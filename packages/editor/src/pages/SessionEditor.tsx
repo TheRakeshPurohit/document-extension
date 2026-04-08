@@ -20,8 +20,11 @@ import {
   updateSteps,
   updateSessionTitle,
   deleteSession,
+  mergeSteps,
+  keepSeparate,
 } from '../api/client.js';
 import StepCard from '../components/StepCard.js';
+import MergePromptCard from '../components/MergePromptCard.js';
 import ExportPanel from '../components/ExportPanel.js';
 import ScreenshotViewer from '../components/ScreenshotViewer.js';
 import ConfirmModal from '../components/ConfirmModal.js';
@@ -157,6 +160,28 @@ export default function SessionEditor() {
 
   const handleCloseViewer = useCallback(() => setViewScreenshot(null), []);
 
+  const handleMergeGroup = useCallback(
+    async (groupIds: string[]) => {
+      const result = await mergeSteps(id!, groupIds);
+      queryClient.setQueryData(['session', id], (old: typeof data) =>
+        old ? { ...old, steps: result.steps } : old
+      );
+      setLocalSteps(null);
+    },
+    [id, queryClient]
+  );
+
+  const handleKeepSeparate = useCallback(
+    async (groupIds: string[]) => {
+      const result = await keepSeparate(id!, groupIds);
+      queryClient.setQueryData(['session', id], (old: typeof data) =>
+        old ? { ...old, steps: result.steps } : old
+      );
+      setLocalSteps(null);
+    },
+    [id, queryClient]
+  );
+
   const handleTitleSave = () => {
     if (titleDraft.trim()) {
       titleMutation.mutate(titleDraft.trim());
@@ -271,16 +296,103 @@ export default function SessionEditor() {
             strategy={verticalListSortingStrategy}
           >
             <div className="flex flex-col gap-6">
-              {steps.map((step, index) => (
-                <StepCard
-                  key={step.id}
-                  step={step}
-                  index={index}
-                  onUpdate={handleStepUpdate}
-                  onDelete={handleStepDelete}
-                  onScreenshotClick={handleScreenshotClick}
-                />
-              ))}
+              {(() => {
+                const elements: React.ReactNode[] = [];
+                const rendered = new Set<string>();
+
+                // Walk steps sequentially.  At each step that heads a merge chain
+                // emit: Card(A), Card(B), PairPrompt([A,B]),
+                //       Card(C)?, ExtendPrompt([A,B,C])? — one prompt per boundary.
+                let i = 0;
+                while (i < steps.length) {
+                  const step = steps[i];
+
+                  if (rendered.has(step.id)) { i++; continue; }
+
+                  rendered.add(step.id);
+                  elements.push(
+                    <StepCard
+                      key={step.id}
+                      step={step}
+                      index={i}
+                      onUpdate={handleStepUpdate}
+                      onDelete={handleStepDelete}
+                      onScreenshotClick={handleScreenshotClick}
+                    />
+                  );
+
+                  // Does this step link to a next mergeable step?
+                  if (step.mergeWithNextId) {
+                    const nextStep = steps.find((s) => s.id === step.mergeWithNextId);
+                    if (nextStep && !rendered.has(nextStep.id)) {
+                      const nextIndex = steps.indexOf(nextStep);
+
+                      rendered.add(nextStep.id);
+                      elements.push(
+                        <StepCard
+                          key={nextStep.id}
+                          step={nextStep}
+                          index={nextIndex}
+                          onUpdate={handleStepUpdate}
+                          onDelete={handleStepDelete}
+                          onScreenshotClick={handleScreenshotClick}
+                        />
+                      );
+
+                      // Pair prompt: "Steps A & B happened together — merge?"
+                      elements.push(
+                        <MergePromptCard
+                          key={`mp-pair-${step.id}`}
+                          sessionId={id!}
+                          mergeGroup={[step, nextStep]}
+                          keepSeparateIds={[step.id, nextStep.id]}
+                          mode="pair"
+                          onMerge={handleMergeGroup}
+                          onKeepSeparate={handleKeepSeparate}
+                        />
+                      );
+
+                      // Does the second step also link to a third?
+                      if (nextStep.mergeWithNextId) {
+                        const thirdStep = steps.find((s) => s.id === nextStep.mergeWithNextId);
+                        if (thirdStep && !rendered.has(thirdStep.id)) {
+                          const thirdIndex = steps.indexOf(thirdStep);
+
+                          rendered.add(thirdStep.id);
+                          elements.push(
+                            <StepCard
+                              key={thirdStep.id}
+                              step={thirdStep}
+                              index={thirdIndex}
+                              onUpdate={handleStepUpdate}
+                              onDelete={handleStepDelete}
+                              onScreenshotClick={handleScreenshotClick}
+                            />
+                          );
+
+                          // Extend prompt: "Also add step 3 into the group above?"
+                          // Merges all 3; keep-separate only unlinks the B→C link.
+                          elements.push(
+                            <MergePromptCard
+                              key={`mp-ext-${step.id}`}
+                              sessionId={id!}
+                              mergeGroup={[step, nextStep, thirdStep]}
+                              keepSeparateIds={[nextStep.id, thirdStep.id]}
+                              mode="extend"
+                              onMerge={handleMergeGroup}
+                              onKeepSeparate={handleKeepSeparate}
+                            />
+                          );
+                        }
+                      }
+                    }
+                  }
+
+                  i++;
+                }
+
+                return elements;
+              })()}
             </div>
           </SortableContext>
         </DndContext>

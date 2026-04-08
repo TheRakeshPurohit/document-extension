@@ -185,6 +185,47 @@ async function resumeContentCapture() {
   try { await chrome.tabs.sendMessage(activeTabId, { type: 'RESUME_CAPTURE' }); } catch {}
 }
 
+/**
+ * After toggling the theme, wait for the browser to actually commit the paint.
+ * Strategy:
+ *  1. Execute a requestAnimationFrame inside the page — resolves after the next
+ *     composited paint, meaning all CSS recalculations are done.
+ *  2. Optionally verify that the dark-class/attribute is present (retry up to 3×
+ *     with 16 ms gaps if the message round-trip was slow).
+ */
+async function waitForThemePaint(targetTheme: 'light' | 'dark' | 'system'): Promise<void> {
+  if (!activeTabId) return;
+  try {
+    // Flush paint via rAF in the page context.
+    await chrome.scripting.executeScript({
+      target: { tabId: activeTabId },
+      world: 'MAIN',
+      func: () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    });
+
+    // Verify the dark theme is actually applied (retry loop for slow round-trips).
+    if (targetTheme === 'dark') {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const [result] = await chrome.scripting.executeScript({
+          target: { tabId: activeTabId },
+          world: 'MAIN',
+          func: () => {
+            const html = document.documentElement;
+            return (
+              html.classList.contains('dark') ||
+              html.getAttribute('data-theme') === 'dark' ||
+              html.getAttribute('data-color-scheme') === 'dark' ||
+              (html.style.colorScheme === 'dark')
+            );
+          },
+        });
+        if (result?.result) break;
+        await new Promise((r) => setTimeout(r, 16));
+      }
+    }
+  } catch { /* tab may be restricted or closed — proceed anyway */ }
+}
+
 async function setEmulatedTheme(theme: 'light' | 'dark' | 'system') {
   if (!activeTabId) return;
   try {
@@ -234,7 +275,7 @@ interface RawDualCapture {
   fallbackRaw: Blob | null;
 }
 
-async function captureRawDual(themeSettleMs = 300, darkSettleMs = 20): Promise<RawDualCapture> {
+async function captureRawDual(themeSettleMs = 300, darkSettleMs = 300): Promise<RawDualCapture> {
   const result: RawDualCapture = { lightRaw: null, darkRaw: null, fallbackRaw: null };
   const originalTheme = state.theme;
   // One paint frame is ~16ms; 20ms gives margin for the browser to repaint
@@ -251,6 +292,7 @@ async function captureRawDual(themeSettleMs = 300, darkSettleMs = 20): Promise<R
         if (needsLightSwitch) {
           await setEmulatedTheme('light');
           await new Promise((r) => setTimeout(r, Math.max(themeSettleMs, paintFrame)));
+          await waitForThemePaint('light');
         }
 
         const lightDataUrl = await chrome.tabs.captureVisibleTab({ format: 'png' });
@@ -258,6 +300,7 @@ async function captureRawDual(themeSettleMs = 300, darkSettleMs = 20): Promise<R
 
         await setEmulatedTheme('dark');
         await new Promise((r) => setTimeout(r, Math.max(darkSettleMs, paintFrame)));
+        await waitForThemePaint('dark');
 
         const darkDataUrl = await chrome.tabs.captureVisibleTab({ format: 'png' });
         result.darkRaw = await (await globalThis.fetch(darkDataUrl)).blob();
@@ -352,7 +395,7 @@ async function handleEventCaptured(event: RecordedEvent) {
     }
 
     const rawCapture = await captureRawDual(
-      isNavigate ? 800 : 150,
+      isNavigate ? 800 : 300,
       isEphemeralClick ? 300 : 300,
     );
     dbg('captureRawDual:done', event.type, event.id);

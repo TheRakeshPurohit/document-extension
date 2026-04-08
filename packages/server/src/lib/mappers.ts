@@ -10,6 +10,7 @@ export function toStep(r: typeof schema.steps.$inferSelect): Step {
     sourceEventIds: JSON.parse(r.sourceEventIds) as string[],
     isEdited: !!r.isEdited,
     subSteps: subSteps.length > 0 ? subSteps : undefined,
+    mergeWithNextId: r.mergeWithNextId ?? undefined,
   };
 }
 

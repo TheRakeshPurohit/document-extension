@@ -32,6 +32,7 @@ interface RawStep {
   inEphemeralUI?: boolean;
   containerRole?: string;
   subSteps?: SubStep[];
+  mergeWithNextId?: string;
 }
 
 function truncate(text: string, max = 50): string {
@@ -461,10 +462,13 @@ export function generateSteps(
   }
 
   const grouped = groupSameAreaSteps(deduped);
-  const merged = mergeTriggerEphemeralPairs(grouped);
+  const detected = detectMergeableGroups(grouped);
 
-  return merged.map((raw, idx) => ({
-    id: uuid(),
+  // Assign real UUIDs first so we can resolve mergeWithNextId references.
+  const ids = detected.map(() => uuid());
+
+  return detected.map((raw, idx) => ({
+    id: ids[idx],
     sessionId,
     sortOrder: idx,
     title: raw.title,
@@ -474,6 +478,10 @@ export function generateSteps(
     sourceEventIds: raw.sourceEventIds,
     isEdited: false,
     subSteps: raw.subSteps,
+    // Resolve sentinel "__merge_N" → the real UUID of step at position N
+    mergeWithNextId: raw.mergeWithNextId?.startsWith('__merge_')
+      ? ids[parseInt(raw.mergeWithNextId.slice('__merge_'.length), 10)]
+      : undefined,
   }));
 }
 
@@ -605,60 +613,90 @@ function groupSameAreaSteps(steps: RawStep[]): RawStep[] {
 }
 
 /**
- * Merge consecutive "trigger → ephemeral" step pairs into one step.
+ * Detect consecutive "trigger → ephemeral" chains (length 2 or 3) and mark
+ * them with `mergeWithNextId` — without actually merging them yet.
  *
- * Example: click "+" (trigger) → click "Add files & photos" in the popup (ephemeral).
- * Both are on the same page and happen within 10 s. We merge them into one step that:
- *  - Uses the EPHEMERAL step's screenshot (popup is open, both elements visible).
- *  - Has numbered sub-steps: 1 = trigger action, 2 = popup action.
- *  - Sets screenshotId = ephemeral event's screenshot so sessions.ts picks the right image.
+ * A qualifying chain is:
+ *  - trigger step (not ephemeral) → 1 or 2 consecutive ephemeral steps
+ *  - Same URL (stripped of hash), within 10 seconds, all have elementRect
+ *
+ * For a 2-step chain: step[0].mergeWithNextId = step[1].id
+ * For a 3-step chain: step[0].mergeWithNextId = step[1].id
+ *                      step[1].mergeWithNextId = step[2].id
+ *
+ * The IDs used here are placeholder tokens — the real step IDs are assigned
+ * later by generateSteps, which reads this field back from the RawStep.
+ * We therefore attach a stable token (index-based) that generateSteps
+ * replaces with the real UUID after mapping.
  */
-function mergeTriggerEphemeralPairs(steps: RawStep[]): RawStep[] {
-  const result: RawStep[] = [];
-  let i = 0;
+function detectMergeableGroups(steps: RawStep[]): RawStep[] {
+  const result: RawStep[] = [...steps];
 
-  while (i < steps.length) {
-    const current = steps[i];
-    const next = i + 1 < steps.length ? steps[i + 1] : null;
+  for (let i = 0; i < result.length; i++) {
+    const current = result[i];
+    if (current.inEphemeralUI || !current.elementRect || !current.url) continue;
 
+    const next = i + 1 < result.length ? result[i + 1] : null;
     if (
-      next &&
-      !current.inEphemeralUI &&
-      current.elementRect &&
-      next.inEphemeralUI &&
-      next.elementRect &&
-      next.url && current.url &&
-      stripHash(next.url) === stripHash(current.url) &&
-      next.timestamp - current.timestamp <= 10_000
-    ) {
-      const subSteps: SubStep[] = [
-        { title: current.title, description: current.description, elementRect: current.elementRect },
-        { title: next.title, description: next.description, elementRect: next.elementRect },
-      ];
+      !next ||
+      !next.inEphemeralUI ||
+      !next.elementRect ||
+      !next.url ||
+      stripHash(next.url) !== stripHash(current.url) ||
+      next.timestamp - current.timestamp > 10_000
+    ) continue;
 
-      result.push({
-        // Title: the final action is what the user cares about
-        title: next.title,
-        description: next.description,
-        // Use the ephemeral step's screenshot — the popup is open so BOTH elements are visible.
-        screenshotId: next.screenshotId,
-        altScreenshotId: next.altScreenshotId,
-        sourceEventIds: [...current.sourceEventIds, ...next.sourceEventIds],
-        timestamp: current.timestamp,
-        url: current.url,
-        elementRect: next.elementRect,
-        viewportSize: next.viewportSize || current.viewportSize,
-        scrollPosition: next.scrollPosition || current.scrollPosition,
-        subSteps,
-      });
-      i += 2;
-    } else {
-      result.push(current);
-      i++;
+    // Mark trigger → first ephemeral
+    // We store a sentinel that will be replaced with the real UUID after mapping.
+    result[i] = { ...current, mergeWithNextId: `__merge_${i + 1}` };
+
+    // Check for a second ephemeral (3-step chain)
+    const nextNext = i + 2 < result.length ? result[i + 2] : null;
+    if (
+      nextNext &&
+      nextNext.inEphemeralUI &&
+      nextNext.elementRect &&
+      nextNext.url &&
+      stripHash(nextNext.url) === stripHash(current.url) &&
+      nextNext.timestamp - current.timestamp <= 10_000
+    ) {
+      result[i + 1] = { ...next, mergeWithNextId: `__merge_${i + 2}` };
     }
   }
 
   return result;
+}
+
+/**
+ * Merge a group of steps (trigger + 1-2 ephemerals) into a single step.
+ * Uses the LAST step's screenshot (popup/overlay is open so all elements visible).
+ * Returns the merged RawStep, or null if the group is invalid.
+ */
+export function mergeStepGroup(group: RawStep[]): RawStep | null {
+  if (group.length < 2) return null;
+
+  const subSteps: SubStep[] = group.map((s) => ({
+    title: s.title,
+    description: s.description,
+    elementRect: s.elementRect,
+  }));
+
+  const last = group[group.length - 1];
+  const first = group[0];
+
+  return {
+    title: last.title,
+    description: last.description,
+    screenshotId: last.screenshotId,
+    altScreenshotId: last.altScreenshotId,
+    sourceEventIds: group.flatMap((s) => s.sourceEventIds),
+    timestamp: first.timestamp,
+    url: first.url,
+    elementRect: last.elementRect,
+    viewportSize: last.viewportSize || first.viewportSize,
+    scrollPosition: last.scrollPosition || first.scrollPosition,
+    subSteps,
+  };
 }
 
 function findGroupLocationHint(group: RawStep[]): string {

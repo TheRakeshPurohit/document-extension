@@ -32,7 +32,6 @@ function pickBestHighlightTarget(hit: Element): Element {
       continue;
     }
 
-    let isClickable = false;
     const role = node.getAttribute('role');
     const tag = node.tagName.toLowerCase();
     const cls = node.className || '';
@@ -40,15 +39,6 @@ function pickBestHighlightTarget(hit: Element): Element {
     const looksLikeOverlay =
       tag === 'dialog' ||
       /modal|dialog|drawer|sheet|overlay|backdrop|popover|portal|content/i.test(String(cls));
-    if (tag === 'button' || tag === 'a' || role === 'button' || role === 'menuitem') {
-      isClickable = true;
-    } else if (node.hasAttribute('onclick') || node.hasAttribute('data-action')) {
-      isClickable = true;
-    } else {
-      try {
-        isClickable = window.getComputedStyle(node).cursor === 'pointer';
-      } catch { /* safe fallback */ }
-    }
 
     // Never promote highlight to overlay/dialog style containers.
     if (isContainerRole || looksLikeOverlay) {
@@ -57,8 +47,32 @@ function pickBestHighlightTarget(hit: Element): Element {
       continue;
     }
 
-    // Prefer a meaningfully larger clickable ancestor, but avoid large wrappers.
-    const largerThanCurrent = rect.width * rect.height > bestRect.width * bestRect.height * 1.8;
+    // Hard area cap: never promote if ancestor is more than 6× bigger.
+    const bestArea = bestRect.width * bestRect.height;
+    const nodeArea = rect.width * rect.height;
+    if (nodeArea > bestArea * 6) {
+      node = node.parentElement;
+      depth++;
+      continue;
+    }
+
+    // Require the promotion target to be a strongly-interactive semantic element —
+    // no generic div/span containers, even if they have cursor:pointer.
+    const isStronglyInteractive =
+      tag === 'button' ||
+      tag === 'a' ||
+      tag === 'input' ||
+      tag === 'select' ||
+      tag === 'textarea' ||
+      role === 'button' ||
+      role === 'link' ||
+      role === 'tab' ||
+      role === 'menuitem' ||
+      role === 'menuitemcheckbox' ||
+      role === 'menuitemradio' ||
+      role === 'option';
+
+    const largerThanCurrent = nodeArea > bestArea * 1.8;
     const notHuge = rect.width <= window.innerWidth * 0.45 && rect.height <= window.innerHeight * 0.25;
     const plausibleButtonLike =
       bestIsTextLike &&
@@ -66,7 +80,11 @@ function pickBestHighlightTarget(hit: Element): Element {
       rect.height <= 90 &&
       rect.width >= 120 &&
       rect.width <= window.innerWidth * 0.8;
-    if ((isClickable || plausibleButtonLike) && largerThanCurrent && notHuge) {
+
+    if (isStronglyInteractive && largerThanCurrent && notHuge) {
+      best = node;
+      bestRect = rect;
+    } else if (plausibleButtonLike && isStronglyInteractive && largerThanCurrent && notHuge) {
       best = node;
       bestRect = rect;
     }

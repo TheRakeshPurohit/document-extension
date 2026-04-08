@@ -43,6 +43,20 @@ export function deleteSession(id: string) {
   return request<{ ok: boolean }>(`/sessions/${id}`, { method: 'DELETE' });
 }
 
+export function mergeSteps(sessionId: string, groupIds: string[]) {
+  return request<{ steps: Step[] }>(`/sessions/${sessionId}/merge-steps`, {
+    method: 'POST',
+    body: JSON.stringify({ groupIds }),
+  });
+}
+
+export function keepSeparate(sessionId: string, groupIds: string[]) {
+  return request<{ steps: Step[] }>(`/sessions/${sessionId}/keep-separate`, {
+    method: 'POST',
+    body: JSON.stringify({ groupIds }),
+  });
+}
+
 export function getExportUrl(id: string) {
   return `/api/sessions/${id}/export`;
 }

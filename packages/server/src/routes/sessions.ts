@@ -4,7 +4,7 @@ import { eq, desc, inArray, count } from 'drizzle-orm';
 import multer from 'multer';
 import fsp from 'fs/promises';
 import { db, schema } from '../db/index.js';
-import { generateSteps } from '../lib/step-generator.js';
+import { generateSteps, mergeStepGroup } from '../lib/step-generator.js';
 import { saveScreenshot, deleteSessionScreenshots, getScreenshotPath } from '../lib/screenshot-store.js';
 import { annotateScreenshot, type Highlight } from '../lib/screenshot-annotator.js';
 import { toStep } from '../lib/mappers.js';
@@ -339,6 +339,7 @@ sessionsRouter.post('/:id/finalize', async (req, res) => {
           ...s,
           sourceEventIds: JSON.stringify(s.sourceEventIds),
           subSteps: JSON.stringify(s.subSteps || []),
+          mergeWithNextId: s.mergeWithNextId ?? null,
           isEdited: s.isEdited,
         }))
       );
@@ -434,6 +435,190 @@ sessionsRouter.put('/:id/steps', async (req, res) => {
     res.json({ steps: updatedSteps.map(toStep) });
   } catch (err) {
     console.error('Update steps error:', err);
+    res.status(500).json({ error: 'Failed to update steps' });
+  }
+});
+
+// Merge a group of steps into one annotated step
+// Body: { groupIds: string[] } — ordered list of step IDs (trigger first, ephemerals after)
+sessionsRouter.post('/:id/merge-steps', async (req, res) => {
+  try {
+    const { groupIds } = req.body as { groupIds: string[] };
+    if (!groupIds || groupIds.length < 2) {
+      res.status(400).json({ error: 'groupIds must have at least 2 step IDs' });
+      return;
+    }
+
+    const sessionId = req.params.id;
+
+    // Load the steps to merge
+    const stepRows = await db
+      .select()
+      .from(schema.steps)
+      .where(inArray(schema.steps.id, groupIds));
+
+    if (stepRows.length !== groupIds.length) {
+      res.status(404).json({ error: 'One or more steps not found' });
+      return;
+    }
+
+    // Sort by groupIds order
+    const stepMap = new Map(stepRows.map((r) => [r.id, toStep(r)]));
+    const orderedSteps = groupIds.map((id) => stepMap.get(id)!);
+
+    // Load source events for each step
+    const allEventIds = orderedSteps.flatMap((s) => s.sourceEventIds);
+    const eventRows = await db
+      .select()
+      .from(schema.events)
+      .where(inArray(schema.events.id, allEventIds));
+    const eventById = new Map(eventRows.map((r) => [r.id, r]));
+
+    // Build the raw group for mergeStepGroup
+    type MetaWithRect = { elementRect?: { x: number; y: number; width: number; height: number }; viewportSize?: { width: number; height: number }; scrollPosition?: { x: number; y: number } };
+    const rawGroup = orderedSteps.map((step) => {
+      const srcEvent = step.sourceEventIds
+        .map((id) => eventById.get(id))
+        .find((e) => !!e);
+      const meta = srcEvent ? JSON.parse(srcEvent.metadata) as MetaWithRect : {};
+      return {
+        title: step.title,
+        description: step.description,
+        screenshotId: step.screenshotId,
+        altScreenshotId: step.altScreenshotId,
+        sourceEventIds: step.sourceEventIds,
+        timestamp: srcEvent?.timestamp ?? 0,
+        url: srcEvent?.url,
+        elementRect: step.subSteps?.[0]?.elementRect ?? meta.elementRect,
+        viewportSize: meta.viewportSize,
+        scrollPosition: meta.scrollPosition,
+        inEphemeralUI: undefined as boolean | undefined,
+        containerRole: undefined as string | undefined,
+        subSteps: step.subSteps,
+      };
+    });
+
+    const merged = mergeStepGroup(rawGroup);
+    if (!merged) {
+      res.status(500).json({ error: 'Failed to merge steps' });
+      return;
+    }
+
+    // Get viewport from events
+    let viewportWidth = 0;
+    let viewportHeight = 0;
+    for (const evRow of eventRows) {
+      const m = JSON.parse(evRow.metadata) as MetaWithRect;
+      if (m.viewportSize) { viewportWidth = m.viewportSize.width; viewportHeight = m.viewportSize.height; break; }
+    }
+
+    // Build highlights for numbered annotation
+    const highlights: Highlight[] = (merged.subSteps || [])
+      .flatMap((sub, idx) =>
+        sub.elementRect ? [{ rect: sub.elementRect, number: idx + 1 } as Highlight] : []
+      );
+
+    // Annotate using last step's RAW screenshot (from its source events, before any
+    // prior annotation was baked in).  Falls back to the step's screenshotId if no
+    // raw event screenshot is found.
+    const lastStep = orderedSteps[orderedSteps.length - 1];
+    const lastSourceIds = lastStep.sourceEventIds;
+    const lastEvents = eventRows.filter((e) => lastSourceIds.includes(e.id));
+    const rawLight = lastEvents.find((e) => e.screenshotId)?.screenshotId ?? lastStep.screenshotId;
+    const rawDark  = lastEvents.find((e) => e.altScreenshotId)?.altScreenshotId ?? lastStep.altScreenshotId;
+
+    let newScreenshotId = rawLight;
+    let newAltScreenshotId = rawDark;
+
+    if (highlights.length > 0 && viewportWidth && viewportHeight) {
+      if (rawLight) {
+        const annotatedId = await annotateAndSave(sessionId, rawLight, highlights, viewportWidth, viewportHeight, false);
+        if (annotatedId) newScreenshotId = annotatedId;
+      }
+      if (rawDark) {
+        const annotatedId = await annotateAndSave(sessionId, rawDark, highlights, viewportWidth, viewportHeight, false);
+        if (annotatedId) newAltScreenshotId = annotatedId;
+      }
+    }
+
+    // Use the sort order of the first step in the group
+    const sortOrder = orderedSteps[0].sortOrder;
+
+    // Insert merged step
+    const mergedId = uuid();
+    await db.insert(schema.steps).values({
+      id: mergedId,
+      sessionId,
+      sortOrder,
+      title: merged.title,
+      description: merged.description,
+      screenshotId: newScreenshotId ?? null,
+      altScreenshotId: newAltScreenshotId ?? null,
+      sourceEventIds: JSON.stringify(merged.sourceEventIds),
+      subSteps: JSON.stringify(merged.subSteps || []),
+      mergeWithNextId: null,
+      isEdited: false,
+    });
+
+    // Delete the original steps
+    await db.delete(schema.steps).where(inArray(schema.steps.id, groupIds));
+
+    // Re-number remaining steps
+    const remaining = await db
+      .select()
+      .from(schema.steps)
+      .where(eq(schema.steps.sessionId, sessionId))
+      .orderBy(schema.steps.sortOrder);
+
+    for (let i = 0; i < remaining.length; i++) {
+      await db.update(schema.steps).set({ sortOrder: i }).where(eq(schema.steps.id, remaining[i].id));
+    }
+
+    await db.update(schema.sessions).set({ updatedAt: Date.now() }).where(eq(schema.sessions.id, sessionId));
+
+    const finalSteps = await db
+      .select()
+      .from(schema.steps)
+      .where(eq(schema.steps.sessionId, sessionId))
+      .orderBy(schema.steps.sortOrder);
+
+    res.json({ steps: finalSteps.map(toStep) });
+  } catch (err) {
+    console.error('Merge steps error:', err);
+    res.status(500).json({ error: 'Failed to merge steps' });
+  }
+});
+
+// Keep steps separate — clears mergeWithNextId from a group
+// Body: { groupIds: string[] }
+sessionsRouter.post('/:id/keep-separate', async (req, res) => {
+  try {
+    const { groupIds } = req.body as { groupIds: string[] };
+    if (!groupIds || groupIds.length === 0) {
+      res.status(400).json({ error: 'groupIds is required' });
+      return;
+    }
+
+    const sessionId = req.params.id;
+
+    for (const stepId of groupIds) {
+      await db
+        .update(schema.steps)
+        .set({ mergeWithNextId: null })
+        .where(eq(schema.steps.id, stepId));
+    }
+
+    await db.update(schema.sessions).set({ updatedAt: Date.now() }).where(eq(schema.sessions.id, sessionId));
+
+    const updatedSteps = await db
+      .select()
+      .from(schema.steps)
+      .where(eq(schema.steps.sessionId, sessionId))
+      .orderBy(schema.steps.sortOrder);
+
+    res.json({ steps: updatedSteps.map(toStep) });
+  } catch (err) {
+    console.error('Keep separate error:', err);
     res.status(500).json({ error: 'Failed to update steps' });
   }
 });

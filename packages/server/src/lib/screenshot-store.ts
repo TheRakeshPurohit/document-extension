@@ -15,7 +15,7 @@ export async function saveScreenshot(
 
   const filePath = path.join(sessionDir, `${screenshotId}.webp`);
   const converted = await sharp(buffer)
-    .webp({ lossless: true, quality: 100 })
+    .webp({ quality: 85 })
     .toBuffer();
   fs.writeFileSync(filePath, converted);
 

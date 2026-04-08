@@ -148,6 +148,7 @@ export interface Step {
   sourceEventIds: string[];
   isEdited: boolean;
   subSteps?: SubStep[];
+  mergeWithNextId?: string;
 }
 
 // ── API Request/Response Shapes ──

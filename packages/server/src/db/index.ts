@@ -63,6 +63,7 @@ sqlite.exec(`
 try { sqlite.exec('ALTER TABLE events ADD COLUMN alt_screenshot_id TEXT'); } catch {}
 try { sqlite.exec('ALTER TABLE steps ADD COLUMN alt_screenshot_id TEXT'); } catch {}
 try { sqlite.exec("ALTER TABLE steps ADD COLUMN sub_steps TEXT NOT NULL DEFAULT '[]'"); } catch {}
+try { sqlite.exec('ALTER TABLE steps ADD COLUMN merge_with_next_id TEXT'); } catch {}
 
 export const db = drizzle(sqlite, { schema });
 

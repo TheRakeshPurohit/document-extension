@@ -74,23 +74,23 @@ function buildSingleHighlightSvg(
 
   if (best >= 30 * scaleX) {
     const arrowLen = Math.min(65 * scaleX, best * 0.7);
-    const gap = 8 * scaleX;
+    const arrowGap = 8 * scaleX;
     let tipX: number, tipY: number, startX: number, startY: number, cpX: number, cpY: number;
 
     if (best === spaceR) {
-      tipX = rx + rw + gap; tipY = ry + rh / 2;
+      tipX = rx + rw + arrowGap; tipY = ry + rh / 2;
       startX = tipX + arrowLen; startY = tipY - arrowLen * 0.7;
       cpX = startX; cpY = tipY;
     } else if (best === spaceL) {
-      tipX = rx - gap; tipY = ry + rh / 2;
+      tipX = rx - arrowGap; tipY = ry + rh / 2;
       startX = tipX - arrowLen; startY = tipY - arrowLen * 0.7;
       cpX = startX; cpY = tipY;
     } else if (best === spaceT) {
-      tipX = rx + rw / 2; tipY = ry - gap;
+      tipX = rx + rw / 2; tipY = ry - arrowGap;
       startX = tipX + arrowLen * 0.7; startY = tipY - arrowLen;
       cpX = tipX; cpY = startY;
     } else {
-      tipX = rx + rw / 2; tipY = ry + rh + gap;
+      tipX = rx + rw / 2; tipY = ry + rh + arrowGap;
       startX = tipX + arrowLen * 0.7; startY = tipY + arrowLen;
       cpX = tipX; cpY = startY;
     }
@@ -114,7 +114,13 @@ function buildSingleHighlightSvg(
   return parts.join('\n');
 }
 
-/** Compute candidate circle positions for a box, in preference order. */
+/** Compute candidate circle positions for a box, in preference order.
+ *
+ *  Primary candidates are the MIDPOINTS of each edge (outside), not corners.
+ *  This matches the reference annotation style where each number floats beside
+ *  the element on the side with the most open space.
+ *  The inside-left / inside-right options are absolute last resorts.
+ */
 function circlePositionCandidates(
   rx: number,
   ry: number,
@@ -124,29 +130,25 @@ function circlePositionCandidates(
   lw: number,
   canvasW: number,
   canvasH: number,
-): Array<{ cx: number; cy: number }> {
-  // Fixed priority: outside corners first (top-right preferred), inside as last resort.
-  // Order is intentional — do NOT sort, as any reordering by heuristic tends to make
-  // things worse when elements are near edges or adjacent to other elements.
-  const candidates: Array<{ cx: number; cy: number }> = [
-    // Outside top-right
-    { cx: rx + rw - cr * 0.3, cy: ry - cr * 0.7 },
-    // Outside top-left
-    { cx: rx + cr * 0.3,       cy: ry - cr * 0.7 },
-    // Outside bottom-right
-    { cx: rx + rw - cr * 0.3, cy: ry + rh + cr * 0.7 },
-    // Outside bottom-left
-    { cx: rx + cr * 0.3,       cy: ry + rh + cr * 0.7 },
-    // Inside top-right (last resort — only if no outside position is clear)
-    { cx: rx + rw - cr - lw,   cy: ry + cr + lw },
-    // Inside top-left
-    { cx: rx + cr + lw,         cy: ry + cr + lw },
+): Array<{ cx: number; cy: number; space: number }> {
+  const gap = 4;
+
+  // Each outside candidate carries the available canvas space in its direction.
+  // Sorting by space descending keeps circles in open areas.
+  const candidates: Array<{ cx: number; cy: number; space: number }> = [
+    { cx: rx - cr - gap,       cy: ry + rh / 2,     space: rx },
+    { cx: rx + rw + cr + gap,  cy: ry + rh / 2,     space: canvasW - (rx + rw) },
+    { cx: rx + rw / 2,         cy: ry - cr - gap,   space: ry },
+    { cx: rx + rw / 2,         cy: ry + rh + cr + gap, space: canvasH - (ry + rh) },
+    // Inside options — last resort, space=0 so always sorted last
+    { cx: rx + cr + lw,        cy: ry + rh / 2,     space: 0 },
+    { cx: rx + rw - cr - lw,   cy: ry + rh / 2,     space: 0 },
   ];
 
-  // Clamp each candidate so the circle is always fully inside the canvas.
-  return candidates.map(({ cx, cy }) => ({
+  return candidates.map(({ cx, cy, space }) => ({
     cx: Math.min(canvasW - cr - 2, Math.max(cr + 2, cx)),
     cy: Math.min(canvasH - cr - 2, Math.max(cr + 2, cy)),
+    space,
   }));
 }
 
@@ -176,28 +178,6 @@ function circleOverlapsBox(
     cy >= ry - margin &&
     cy <= ry + rh + margin
   );
-}
-
-/** Returns the closest point on a rect border to the given point. */
-function nearestPointOnBox(
-  px: number, py: number,
-  rx: number, ry: number, rw: number, rh: number,
-): { x: number; y: number } {
-  const clampedX = Math.max(rx, Math.min(rx + rw, px));
-  const clampedY = Math.max(ry, Math.min(ry + rh, py));
-  // If point is inside, snap to the nearest edge
-  if (px >= rx && px <= rx + rw && py >= ry && py <= ry + rh) {
-    const dLeft   = px - rx;
-    const dRight  = rx + rw - px;
-    const dTop    = py - ry;
-    const dBottom = ry + rh - py;
-    const minD    = Math.min(dLeft, dRight, dTop, dBottom);
-    if (minD === dLeft)   return { x: rx,        y: py };
-    if (minD === dRight)  return { x: rx + rw,   y: py };
-    if (minD === dTop)    return { x: px,         y: ry };
-    return                       { x: px,         y: ry + rh };
-  }
-  return { x: clampedX, y: clampedY };
 }
 
 function buildNumberedHighlightSvg(
@@ -243,27 +223,9 @@ function buildNumberedHighlightSvg(
     `fill="none" stroke="${HIGHLIGHT_COLOR}" stroke-width="${lw}"/>`
   );
 
-  // Connector line: draw when the circle has been pushed away from the element box.
-  // Line runs from the circle edge to the nearest point on the element border.
-  const nearest = nearestPointOnBox(circleX, circleY, rx, ry, rw, rh);
-  const dx = circleX - nearest.x;
-  const dy = circleY - nearest.y;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  const connectorThreshold = cr * 1.8; // only draw if circle is clearly detached
-  if (dist > connectorThreshold) {
-    // Start the line at the circle's edge (not centre) to avoid overlapping the number
-    const angle = Math.atan2(dy, dx);
-    const lineStartX = circleX - (cr + 2 * scaleX) * Math.cos(angle);
-    const lineStartY = circleY - (cr + 2 * scaleX) * Math.sin(angle);
-    parts.push(
-      `<line x1="${lineStartX}" y1="${lineStartY}" x2="${nearest.x}" y2="${nearest.y}" ` +
-      `stroke="${HIGHLIGHT_COLOR}" stroke-width="${lw * 0.75}" stroke-linecap="round" opacity="0.85"/>`
-    );
-  }
-
+  // Circle + number drawn last so they are always on top
   parts.push(
     `<circle cx="${circleX}" cy="${circleY}" r="${cr}" fill="${HIGHLIGHT_COLOR}"/>` +
-    `<circle cx="${circleX}" cy="${circleY}" r="${cr + 2 * scaleX}" fill="none" stroke="white" stroke-width="${2 * scaleX}"/>` +
     `<text x="${circleX}" y="${circleY}" dy="0.35em" text-anchor="middle" ` +
     `fill="white" font-size="${cr * 1.2}px" font-weight="bold" font-family="Arial, Helvetica, sans-serif">${h.number}</text>`
   );
@@ -278,7 +240,7 @@ export async function annotateScreenshot(
   const { highlights, viewportWidth, viewportHeight } = options;
 
   if (highlights.length === 0) {
-    return sharp(rawImageBuffer).webp({ lossless: true }).toBuffer();
+    return sharp(rawImageBuffer).webp({ quality: 85 }).toBuffer();
   }
 
   const metadata = await sharp(rawImageBuffer).metadata();
@@ -306,7 +268,7 @@ export async function annotateScreenshot(
     );
     return sharp(rawImageBuffer)
       .composite([{ input: svgOverlay, top: 0, left: 0 }])
-      .webp({ lossless: true })
+      .webp({ quality: 85 })
       .toBuffer();
   }
 
@@ -323,7 +285,7 @@ export async function annotateScreenshot(
   interface BoxedHighlight {
     highlight: Highlight;
     rx: number; ry: number; rw: number; rh: number;
-    candidates: Array<{ cx: number; cy: number }>;
+    candidates: Array<{ cx: number; cy: number; space: number }>;
   }
 
   const boxed: BoxedHighlight[] = highlights.map((h) => {
@@ -343,39 +305,17 @@ export async function annotateScreenshot(
     };
   });
 
-  // Greedy assignment with directional bias.
+  // Greedy assignment: for each highlight, pick the candidate with the most
+  // available canvas space that doesn't collide with already-placed circles or
+  // with other highlight boxes.
   const placed: Array<{ cx: number; cy: number }> = [];
 
   for (let i = 0; i < boxed.length; i++) {
     const b = boxed[i];
 
-    // Compute centroid of all OTHER highlight boxes.
-    const others = boxed.filter((_, j) => j !== i);
-
-    // Sort the outside candidates (first 4) to prefer corners pointing AWAY
-    // from the centroid of the other elements. Inside candidates (last 2) always
-    // stay at the end as absolute last resort.
-    const outside = b.candidates.slice(0, 4);
-    const inside  = b.candidates.slice(4);
-
-    if (others.length > 0) {
-      const otherCx = others.reduce((s, o) => s + o.rx + o.rw / 2, 0) / others.length;
-      const otherCy = others.reduce((s, o) => s + o.ry + o.rh / 2, 0) / others.length;
-      const myCx = b.rx + b.rw / 2;
-      const myCy = b.ry + b.rh / 2;
-      // "Away" vector: direction from cluster centroid toward this element.
-      const awayX = myCx - otherCx;
-      const awayY = myCy - otherCy;
-
-      outside.sort((ca, cb) => {
-        // Project candidate offset onto the away vector; prefer higher dot product.
-        const dotA = (ca.cx - myCx) * awayX + (ca.cy - myCy) * awayY;
-        const dotB = (cb.cx - myCx) * awayX + (cb.cy - myCy) * awayY;
-        return dotB - dotA;
-      });
-    }
-
-    const ordered = [...outside, ...inside];
+    // Sort by available space descending so circles land in the most open area.
+    // Inside candidates (space=0) always fall last.
+    const ordered = [...b.candidates].sort((a, c) => c.space - a.space);
 
     let chosen = ordered[0];
     for (const c of ordered) {
@@ -405,6 +345,6 @@ export async function annotateScreenshot(
 
   return sharp(rawImageBuffer)
     .composite([{ input: svgOverlay, top: 0, left: 0 }])
-    .webp({ lossless: true })
+    .webp({ quality: 85 })
     .toBuffer();
 }
