@@ -2,22 +2,16 @@
 
 A Chrome/Edge extension that records your browser actions, captures screenshots in both light and dark themes, and generates step-by-step documentation. Export everything as a ZIP with Markdown and WebP images.
 
-## What's New in v0.1.1
+## Release Notes
 
-- **Full-viewport screenshots** — no more aggressive cropping; every screenshot shows the complete page with the annotation overlaid at the correct position
-- **Multi-action grouped steps** — consecutive clicks on the same page section are merged into one step with numbered orange circle annotations (1, 2, 3…)
-- **Popup / ephemeral UI merging** — clicking a trigger button (e.g. "+") then selecting an item from the resulting popup produces one step, using the popup-open screenshot so both annotations are visible
-- **Annotate prompt** — after each click, an inline toolbar row asks "Annotate this?" (auto-confirms after 4 s); choosing Skip removes the highlight from that step
-- **Faster, more reliable screenshot capture** — clicks are never dropped during dual-theme capture; `stopImmediatePropagation` and a gate mechanism freeze the page state before the screenshot is taken
-- **Immediate toolbar dismissal on Stop** — the floating bar disappears as soon as you click Stop, before async cleanup finishes
-- **Better dark-mode fidelity** — 300 ms settle time ensures all CSS custom-property-based themes are fully applied before the dark screenshot is taken
+For full version history and detailed release notes, see `CHANGELOG.md`.
 
 ## Features
 
 - **Action recording**: captures clicks, text input, dropdowns, form submissions, page navigation, and modals
 - **Dual-theme screenshots**: automatically toggles between light and dark themes to capture both versions
 - **Element highlighting**: adds an orange border and arrow to the clicked element in each screenshot; numbered circles for grouped multi-action steps
-- **Full-viewport screenshots**: every screenshot shows the complete page context — no cropping
+- **Full-viewport screenshots**: every screenshot shows the complete page context with no cropping
 - **Grouped steps with numbered annotations**: multiple related clicks on the same page area are combined into one card with a single annotated screenshot
 - **Popup-aware merging**: trigger → popup-item sequences are merged into one step using the popup-open screenshot
 - **Per-click annotate prompt**: opt out of highlighting a specific step without stopping the recording
@@ -85,7 +79,7 @@ If behavior feels stuck, stop recording and start a fresh session on the current
 
 These behaviors are intentional and help keep screenshots and steps consistent:
 
-- **Full-viewport screenshots**: every screenshot shows the complete page — the highlight annotation is overlaid at the element's exact position without any cropping.
+- **Full-viewport screenshots**: every screenshot shows the complete page, and the highlight annotation is overlaid at the element's exact position without any cropping.
 - **Multi-action steps**: if you click several related elements in the same area of the page within 30 s, they are automatically grouped into one step. The screenshot is taken before any replays, so all annotated elements are visible together.
 - **Popup / trigger merging**: clicking a button that opens a popup, then clicking an item inside the popup, produces a single merged step. The screenshot used is the one captured while the popup was open, so both the trigger button (annotation 1) and the popup item (annotation 2) are visible.
 - **Visual vs non-visual events**: dual-theme screenshots are prioritised for visual actions (clicks, modal open/close, page navigation). Text/select/submit events may be recorded without full dual capture to reduce noise and extra flicker.
@@ -110,7 +104,7 @@ npm run build:server     # build the server only
 - Server API: `http://localhost:3001/api`
 - Editor dev server: `http://localhost:5173` (proxies API requests to the server)
 - Database: `./data/docext.db` (SQLite)
-- Screenshots: `./data/screenshots/` (lossless WebP)
+- Screenshots: `./data/screenshots/` (WebP, quality 85)
 
 ## Key Files
 
