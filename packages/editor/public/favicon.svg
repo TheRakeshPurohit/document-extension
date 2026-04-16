@@ -1,12 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-  <circle cx="12" cy="12" r="10" fill="#6366f1"/>
-  <path
-    d="M9 7.5h4a4.5 4.5 0 0 1 0 9H9"
-    fill="none"
-    stroke="#ffffff"
-    stroke-width="2.2"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-  />
-</svg>
-
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" aria-hidden="true" focusable="false" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#6366f1"/><path fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 7.5h4a4.5 4.5 0 0 1 0 9H9"/></svg>
