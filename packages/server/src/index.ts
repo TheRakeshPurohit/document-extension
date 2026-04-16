@@ -32,8 +32,14 @@ const isDev = process.env.NODE_ENV !== 'production';
 async function start() {
   if (isDev) {
     const { createServer: createViteServer } = await import('vite');
+    const react = (await import('@vitejs/plugin-react')).default;
     const vite = await createViteServer({
+      configFile: false,
       root: EDITOR_DIR,
+      plugins: [react()],
+      resolve: {
+        alias: { '@docext/shared': path.resolve(PACKAGES_DIR, 'shared', 'src') },
+      },
       server: { middlewareMode: true },
       appType: 'custom',
     });
