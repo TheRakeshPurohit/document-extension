@@ -53,10 +53,15 @@ export default function SessionEditor() {
   const serverSteps = data?.steps ?? [];
   const steps = localSteps ?? serverSteps;
 
-  const mutationCountRef = useRef(0);
+  // Mutation sequencing: each flushUpdate gets a monotonically increasing id.
+  // Only the LATEST in-flight mutation is allowed to swap localSteps back to
+  // server data — earlier responses returning out of order would otherwise
+  // briefly snap the UI back to a stale ordering.
+  const mutationSeqRef = useRef(0);
+  const latestMutationIdRef = useRef(0);
 
   const updateMutation = useMutation({
-    mutationFn: (args: { steps: Step[]; deletedStepIds?: string[] }) =>
+    mutationFn: (args: { steps: Step[]; deletedStepIds?: string[]; seq: number }) =>
       updateSteps(id!, {
         steps: args.steps.map((s, i) => ({
           id: s.id,
@@ -65,29 +70,30 @@ export default function SessionEditor() {
           description: s.description,
         })),
         deletedStepIds: args.deletedStepIds,
-      }),
+      }).then((res) => ({ ...res, seq: args.seq })),
     onSuccess: (result) => {
-      mutationCountRef.current--;
       queryClient.setQueryData(['session', id], (old: typeof data) =>
         old ? { ...old, steps: result.steps } : old
       );
-      if (mutationCountRef.current === 0) setLocalSteps(null);
+      if (result.seq === latestMutationIdRef.current) setLocalSteps(null);
       setSaveError(null);
     },
     onError: (err) => {
-      mutationCountRef.current--;
       console.error('Step update failed:', err);
       setSaveError('Failed to save — try again');
-      if (mutationCountRef.current === 0) setLocalSteps(null);
+      // Drop the optimistic copy only if no newer mutation is pending — that
+      // newer one will clear it on success.
+      if (mutationSeqRef.current === latestMutationIdRef.current) setLocalSteps(null);
     },
   });
 
   const { mutate } = updateMutation;
 
   const flushUpdate = useCallback((args: { steps: Step[]; deletedStepIds?: string[] }) => {
-    mutationCountRef.current++;
+    const seq = ++mutationSeqRef.current;
+    latestMutationIdRef.current = seq;
     setLocalSteps(args.steps);
-    mutate(args);
+    mutate({ ...args, seq });
   }, [mutate]);
 
   const titleMutation = useMutation({
@@ -340,12 +346,14 @@ export default function SessionEditor() {
                       );
 
                       // Pair prompt: "Steps A & B happened together — merge?"
+                      // Keep-separate only needs to clear A's link; B's link
+                      // (if any) is handled by the extend prompt below.
                       elements.push(
                         <MergePromptCard
                           key={`mp-pair-${step.id}`}
                           sessionId={id!}
                           mergeGroup={[step, nextStep]}
-                          keepSeparateIds={[step.id, nextStep.id]}
+                          keepSeparateIds={[step.id]}
                           mode="pair"
                           onMerge={handleMergeGroup}
                           onKeepSeparate={handleKeepSeparate}
@@ -377,7 +385,7 @@ export default function SessionEditor() {
                               key={`mp-ext-${step.id}`}
                               sessionId={id!}
                               mergeGroup={[step, nextStep, thirdStep]}
-                              keepSeparateIds={[nextStep.id, thirdStep.id]}
+                              keepSeparateIds={[nextStep.id]}
                               mode="extend"
                               onMerge={handleMergeGroup}
                               onKeepSeparate={handleKeepSeparate}

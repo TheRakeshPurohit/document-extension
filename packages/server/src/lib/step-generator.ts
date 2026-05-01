@@ -442,7 +442,9 @@ export function generateSteps(
       }
 
       // Container subsumption: if prev is a generic click and current is a
-      // more specific click on something inside the same area, drop prev
+      // more specific click on something inside the same area, drop prev.
+      // Run regexes against the NORMALIZED form so curly quotes from
+      // truncate(...) don't break matching.
       if (timeDiff < 5000) {
         const prevNorm = normalizeTitle(prev.title);
         const stepNorm = normalizeTitle(step.title);

@@ -9,7 +9,6 @@ import type {
   DomEdit,
 } from '@docext/shared';
 import { resolveElement, type ElementInfo } from './element-resolver.js';
-import { findCropContainer } from './crop-helpers.js';
 
 const SENSITIVE_RE = /password|secret|token|ssn|credit.?card|cvv|pin|social.?security/i;
 
@@ -145,7 +144,6 @@ export function buildClickEvent(
       }
     }
   } catch { /* safe fallback */ }
-  const cr = findCropContainer(el);
   const meta: ClickMeta = {
     elementTag: info.tag,
     elementText: info.text,
@@ -154,7 +152,6 @@ export function buildClickEvent(
     selector: info.selector,
     coordinates: { x: e.clientX, y: e.clientY },
     elementRect: { x: highlightRect.left, y: highlightRect.top, width: highlightRect.width, height: highlightRect.height },
-    cropRect: { x: cr.x, y: cr.y, width: cr.width, height: cr.height },
     viewportSize: { width: window.innerWidth, height: window.innerHeight },
     nearestHeading: info.nearestHeading,
     sectionLabel: info.sectionLabel,
@@ -196,7 +193,6 @@ export function buildInputEvent(el: Element, info: ElementInfo): RecordedEvent {
   if (fieldType === 'password' || SENSITIVE_RE.test(label)) value = '••••••';
 
   const r = el.getBoundingClientRect();
-  const cr = findCropContainer(el);
   const meta: InputMeta = {
     fieldLabel: label,
     fieldType,
@@ -208,7 +204,6 @@ export function buildInputEvent(el: Element, info: ElementInfo): RecordedEvent {
     containerRole: info.containerRole,
     breadcrumb: info.breadcrumb,
     elementRect: { x: r.left, y: r.top, width: r.width, height: r.height },
-    cropRect: { x: cr.x, y: cr.y, width: cr.width, height: cr.height },
     viewportSize: { width: window.innerWidth, height: window.innerHeight },
     parentId: info.parentId,
     listPosition: info.listPosition,
@@ -228,7 +223,6 @@ export function buildSelectEvent(el: HTMLSelectElement, info: ElementInfo): Reco
   const selectedOption = el.options[el.selectedIndex]?.text || el.value;
   const label = info.fieldLabel || info.ariaLabel || info.placeholder || 'dropdown';
   const r = el.getBoundingClientRect();
-  const cr = findCropContainer(el);
   const meta: SelectMeta = {
     fieldLabel: label,
     selectedOption,
@@ -238,7 +232,6 @@ export function buildSelectEvent(el: HTMLSelectElement, info: ElementInfo): Reco
     containerRole: info.containerRole,
     breadcrumb: info.breadcrumb,
     elementRect: { x: r.left, y: r.top, width: r.width, height: r.height },
-    cropRect: { x: cr.x, y: cr.y, width: cr.width, height: cr.height },
     viewportSize: { width: window.innerWidth, height: window.innerHeight },
     parentId: info.parentId,
     listPosition: info.listPosition,

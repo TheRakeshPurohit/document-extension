@@ -1,4 +1,5 @@
 import sharp from 'sharp';
+import { encodeAsWebp } from './screenshot-store.js';
 
 export interface Rect {
   x: number;
@@ -240,7 +241,7 @@ export async function annotateScreenshot(
   const { highlights, viewportWidth, viewportHeight } = options;
 
   if (highlights.length === 0) {
-    return sharp(rawImageBuffer).webp({ quality: 85 }).toBuffer();
+    return encodeAsWebp(rawImageBuffer, 85);
   }
 
   const metadata = await sharp(rawImageBuffer).metadata();
@@ -266,10 +267,11 @@ export async function annotateScreenshot(
     const svgOverlay = Buffer.from(
       `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasW}" height="${canvasH}">${svgParts.join('')}</svg>`
     );
-    return sharp(rawImageBuffer)
+    const composited = await sharp(rawImageBuffer)
       .composite([{ input: svgOverlay, top: 0, left: 0 }])
-      .webp({ quality: 85 })
+      .png()
       .toBuffer();
+    return encodeAsWebp(composited, 85);
   }
 
   // ── Numbered highlights: two-pass layout ──────────────────────────────────
@@ -343,8 +345,12 @@ export async function annotateScreenshot(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasW}" height="${canvasH}">${svgParts.join('')}</svg>`
   );
 
-  return sharp(rawImageBuffer)
+  // Composite to PNG first so the bytes are guaranteed-decodable, then encode
+  // through the magic-byte-checked WebP path. Avoids sharp ever silently
+  // emitting TIFF/JPEG when the chained operations include `.composite()`.
+  const composited = await sharp(rawImageBuffer)
     .composite([{ input: svgOverlay, top: 0, left: 0 }])
-    .webp({ quality: 85 })
+    .png()
     .toBuffer();
+  return encodeAsWebp(composited, 85);
 }

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { getScreenshotPath, screenshotExists } from '../lib/screenshot-store.js';
+import { screenshotExists, readScreenshotEnsuringWebp } from '../lib/screenshot-store.js';
 
 export const screenshotsRouter = Router();
 
@@ -16,8 +16,10 @@ screenshotsRouter.get('/:id', async (req, res) => {
       return;
     }
 
-    const fullPath = getScreenshotPath(row.filePath);
-    res.type('image/webp').sendFile(fullPath);
+    // Validate magic bytes; if the file on disk is silently TIFF/PNG/etc.
+    // it's re-encoded in place once and then served as guaranteed WebP.
+    const buffer = await readScreenshotEnsuringWebp(row.filePath);
+    res.type('image/webp').send(buffer);
   } catch (err) {
     res.status(500).json({ error: 'Failed to get screenshot' });
   }

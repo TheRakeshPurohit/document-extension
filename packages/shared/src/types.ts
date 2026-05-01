@@ -16,7 +16,6 @@ export interface ClickMeta {
   selector: string;
   coordinates: { x: number; y: number };
   elementRect?: { x: number; y: number; width: number; height: number };
-  cropRect?: { x: number; y: number; width: number; height: number };
   viewportSize?: { width: number; height: number };
   nearestHeading?: string;
   sectionLabel?: string;
@@ -50,7 +49,6 @@ export interface InputMeta {
   containerRole?: string;
   breadcrumb?: string;
   elementRect?: { x: number; y: number; width: number; height: number };
-  cropRect?: { x: number; y: number; width: number; height: number };
   viewportSize?: { width: number; height: number };
   parentId?: string;
   listPosition?: string;
@@ -66,7 +64,6 @@ export interface SelectMeta {
   containerRole?: string;
   breadcrumb?: string;
   elementRect?: { x: number; y: number; width: number; height: number };
-  cropRect?: { x: number; y: number; width: number; height: number };
   viewportSize?: { width: number; height: number };
   parentId?: string;
   listPosition?: string;

@@ -109,7 +109,7 @@ function getNearestHeading(el: Element): string | undefined {
   let current: Element | null = el;
   let depth = 0;
   while (current && depth < 8) {
-    const heading = current.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]');
+    const heading: Element | null = current.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]');
     if (heading && heading !== el) {
       const text = (heading.textContent || '').trim();
       if (text && text.length < 80) return text;
@@ -190,9 +190,9 @@ function buildAnchoredPath(el: Element): string | null {
       return segments.join(' > ');
     }
 
-    const parent = current.parentElement;
-    if (parent) {
-      const siblings = Array.from(parent.children).filter((c) => c.tagName === current!.tagName);
+    const parentEl: Element | null = current.parentElement;
+    if (parentEl) {
+      const siblings = Array.from(parentEl.children).filter((c) => c.tagName === current!.tagName);
       if (siblings.length === 1) {
         segments.unshift(tag);
       } else {
@@ -203,7 +203,7 @@ function buildAnchoredPath(el: Element): string | null {
       segments.unshift(tag);
     }
 
-    current = parent;
+    current = parentEl;
     depth++;
   }
   return null;
@@ -225,9 +225,16 @@ export function buildSelector(el: Element): string {
   if (ariaLabel && ariaLabel.length < 60) return `${tag}[aria-label="${CSS.escape(ariaLabel)}"]`;
 
   const role = el.getAttribute('role');
-  const text = getDirectText(el);
-  if (role && text && text.length < 40) {
-    return `[role="${role}"]`;
+  // Only return a role-anchored selector when the role is GLOBALLY unique on
+  // the page (otherwise `[role="button"]` would match every button-role
+  // element). Falls through to the parent-relative path when ambiguous.
+  if (role) {
+    try {
+      const matches = document.querySelectorAll(`[role="${CSS.escape(role)}"]`);
+      if (matches.length === 1 && matches[0] === el) {
+        return `[role="${CSS.escape(role)}"]`;
+      }
+    } catch { /* invalid role string */ }
   }
 
   const parent = el.parentElement;
@@ -260,18 +267,21 @@ function buildSelectorShallow(el: Element): string {
   const ariaLabel = el.getAttribute('aria-label');
   if (ariaLabel && ariaLabel.length < 60) return `${tag}[aria-label="${CSS.escape(ariaLabel)}"]`;
 
+  // tag + role disambiguates among multiple roles of the same kind on the page,
+  // and nth-child below disambiguates within the same parent.
   const role = el.getAttribute('role');
-  if (role) return `${tag}[role="${CSS.escape(role)}"]`;
-
   const parent = el.parentElement;
-  if (!parent) return tag;
+  if (!parent) {
+    return role ? `${tag}[role="${CSS.escape(role)}"]` : tag;
+  }
 
+  const baseSel = role ? `${tag}[role="${CSS.escape(role)}"]` : tag;
   const siblings = Array.from(parent.children).filter(
     (c) => c.tagName === el.tagName
   );
-  if (siblings.length === 1) return tag;
+  if (siblings.length === 1) return baseSel;
   const index = siblings.indexOf(el) + 1;
-  return `${tag}:nth-child(${index})`;
+  return role ? `${baseSel}:nth-child(${index})` : `${tag}:nth-child(${index})`;
 }
 
 function getParentText(el: Element): string | undefined {

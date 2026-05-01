@@ -48,7 +48,9 @@ export async function updateEventSkipHighlight(eventId: string): Promise<void> {
     req.onsuccess = () => {
       const event = req.result as RecordedEvent | undefined;
       if (event) {
-        (event.metadata as Record<string, unknown>).skipHighlight = true;
+        // EventMetadata is a discriminated union without an index signature; cast
+        // through `unknown` so we can attach skipHighlight regardless of variant.
+        (event.metadata as unknown as Record<string, unknown>).skipHighlight = true;
         store.put(event);
       }
       resolve();
@@ -93,6 +95,29 @@ export async function clearAll(): Promise<void> {
     const tx = db.transaction([EVENTS_STORE, SCREENSHOTS_STORE], 'readwrite');
     tx.objectStore(EVENTS_STORE).clear();
     tx.objectStore(SCREENSHOTS_STORE).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/**
+ * Selective clear used when a batch upload partially succeeded:
+ * - Removes events whose ids are listed in `eventIds`.
+ * - Removes screenshots whose ids are listed in `screenshotIds`.
+ * Anything left behind is retried on the next flush.
+ */
+export async function deleteByIds(
+  eventIds: string[],
+  screenshotIds: string[],
+): Promise<void> {
+  if (eventIds.length === 0 && screenshotIds.length === 0) return;
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([EVENTS_STORE, SCREENSHOTS_STORE], 'readwrite');
+    const evStore = tx.objectStore(EVENTS_STORE);
+    for (const id of eventIds) evStore.delete(id);
+    const ssStore = tx.objectStore(SCREENSHOTS_STORE);
+    for (const id of screenshotIds) ssStore.delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

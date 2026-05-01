@@ -28,6 +28,10 @@ interface PersistedEdit {
   modified: string;
   tag: string;
   ancestorPath?: string;
+  /** Short signature of the nearest meaningful ancestors (role / aria-label /
+   *  stable id). Used to disambiguate popup re-mounts where the saved
+   *  ancestorPath is structurally similar but the actual context differs. */
+  ancestorSignature?: string;
 }
 
 let editModeActive = false;
@@ -82,6 +86,43 @@ function ancestorPathMatches(elPath: string, storedPath: string): boolean {
   return check === 0 || matches >= Math.ceil(check / 2);
 }
 
+/** Build a fingerprint from up to 6 ancestors using semantically meaningful
+ *  attributes only (role / aria-label / stable id / dialog-like tags).
+ *  Differs from `getAncestorPath` (which uses tag chain). The richer signal
+ *  helps when popups remount with different structural ancestors but
+ *  consistent semantic ones. */
+function getAncestorSignature(el: Element): string {
+  const parts: string[] = [];
+  let cur = el.parentElement;
+  let depth = 0;
+  while (cur && depth < 6) {
+    const tag = cur.tagName.toLowerCase();
+    if (tag === 'body' || tag === 'html') break;
+    const role = cur.getAttribute('role');
+    const aria = cur.getAttribute('aria-label');
+    const id = cur.getAttribute('id');
+    let token = '';
+    if (aria && aria.length < 80) token = `a:${aria}`;
+    else if (role) token = `r:${role}`;
+    else if (id && id.length < 40 && !/[:.\[\]]/.test(id)) token = `i:${id}`;
+    else if (tag === 'dialog' || tag === 'nav' || tag === 'aside' || tag === 'header' || tag === 'footer') token = `t:${tag}`;
+    if (token) parts.push(token);
+    cur = cur.parentElement;
+    depth++;
+  }
+  return parts.join('|');
+}
+
+function signatureMatchScore(elSig: string, storedSig: string): number {
+  if (!storedSig) return 0;
+  if (!elSig) return 0;
+  const elParts = new Set(elSig.split('|'));
+  const storedParts = storedSig.split('|');
+  let matched = 0;
+  for (const p of storedParts) if (elParts.has(p)) matched++;
+  return matched;
+}
+
 function findElementByOriginalText(edit: PersistedEdit): Element | null {
   if (!edit.original) return null;
   const needle = normalizeWs(edit.original);
@@ -89,6 +130,7 @@ function findElementByOriginalText(edit: PersistedEdit): Element | null {
   try {
     const candidates = document.querySelectorAll(edit.tag);
     let best: Element | null = null;
+    let bestSigScore = -1;
     let bestChildren = Infinity;
     for (const el of candidates) {
       if (el === activeEditable || el.contains(activeEditable!)) continue;
@@ -96,9 +138,15 @@ function findElementByOriginalText(edit: PersistedEdit): Element | null {
       if (el instanceof HTMLElement && !isSafeToHide(el)) continue;
       if (normalizeWs(el.textContent || '') !== needle) continue;
       if (edit.ancestorPath && !ancestorPathMatches(getAncestorPath(el), edit.ancestorPath)) continue;
+
+      const sigScore = edit.ancestorSignature
+        ? signatureMatchScore(getAncestorSignature(el), edit.ancestorSignature)
+        : 0;
       const count = el.children.length;
-      if (count < bestChildren) {
+      // Prefer highest signature score; break ties by fewest children.
+      if (sigScore > bestSigScore || (sigScore === bestSigScore && count < bestChildren)) {
         best = el;
+        bestSigScore = sigScore;
         bestChildren = count;
       }
     }
@@ -108,9 +156,15 @@ function findElementByOriginalText(edit: PersistedEdit): Element | null {
 }
 
 /**
- * Modify only the first text node inside an element rather than wiping
- * all child nodes via el.textContent. This preserves framework-managed
- * sub-trees (icons, badges, etc.) and avoids infinite MutationObserver loops.
+ * Strategy for applying a text-only edit:
+ *   - If the element has element children (e.g. icons, badges, nested spans),
+ *     write the new value into the FIRST text node and CLEAR all other text
+ *     nodes. This keeps framework-managed sub-trees intact while preventing
+ *     stale trailing text nodes (e.g. "<modified> world!" when the original
+ *     contained `<p>Hello <strong>world</strong>!</p>`).
+ *   - If the element has no element children, set textContent directly.
+ *   This avoids infinite MutationObserver loops and keeps rendered text
+ *   exactly equal to `newText`.
  */
 function isSafeToHide(el: HTMLElement): boolean {
   try {
@@ -134,12 +188,24 @@ function hideElement(el: HTMLElement) {
 }
 
 function applyTextEdit(el: Element, newText: string) {
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  const firstTextNode = walker.nextNode();
-  if (firstTextNode) {
-    firstTextNode.nodeValue = newText;
-  } else {
+  const hasElementChildren = el.children.length > 0;
+  if (!hasElementChildren) {
     el.textContent = newText;
+    return;
+  }
+
+  const textNodes: Text[] = [];
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
+
+  if (textNodes.length === 0) {
+    el.textContent = newText;
+    return;
+  }
+
+  textNodes[0].nodeValue = newText;
+  for (let i = 1; i < textNodes.length; i++) {
+    textNodes[i].nodeValue = '';
   }
 }
 
@@ -289,6 +355,12 @@ export async function loadEditsFromStorage() {
     for (const [selector, edit] of Object.entries(stored)) {
       if (edit && edit.modified && edit.tag) {
         persistedEdits.set(selector, edit);
+        // Re-hydrate the domEdits array so click events captured AFTER a page
+        // refresh still carry the historical edit list (otherwise clicks would
+        // appear to undo the edits when replayed for documentation).
+        if (edit.modified !== '___DELETED___') {
+          domEdits.push({ selector, original: edit.original, modified: edit.modified });
+        }
       }
     }
     if (persistedEdits.size === 0) return;
@@ -407,6 +479,7 @@ function commitActiveEditable() {
       modified,
       tag: el.tagName.toLowerCase(),
       ancestorPath: getAncestorPath(el),
+      ancestorSignature: getAncestorSignature(el),
     });
     if (el.firstChild) domSnapshot.set(el.firstChild, modified);
     saveEditsToStorage();
@@ -457,6 +530,7 @@ function handleEditKeydown(e: KeyboardEvent) {
       modified: DELETED_SENTINEL,
       tag: el.tagName.toLowerCase(),
       ancestorPath: getAncestorPath(el),
+      ancestorSignature: getAncestorSignature(el),
     });
     saveEditsToStorage();
     return;

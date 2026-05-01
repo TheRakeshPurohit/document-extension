@@ -50,6 +50,13 @@ let lastClickSentAt = 0;
 const DEBUG_CLICK_PIPELINE = false;
 let gateSafetyTimer: number | null = null;
 
+// Highlight prompt auto-dismisses after 4000ms (see floating-toolbar.ts).
+// The gate safety timer must outlive that plus the BG capture pipeline to
+// avoid releasing the gate mid-capture. Bump together if either changes.
+const HIGHLIGHT_PROMPT_TIMEOUT_MS = 4000;
+const BG_PIPELINE_BUDGET_MS = 2000;
+const GATE_SAFETY_TIMEOUT_MS = HIGHLIGHT_PROMPT_TIMEOUT_MS + BG_PIPELINE_BUDGET_MS;
+
 // Guard against duplicate script injection
 const INJECTED_KEY = '__docext_injected';
 if ((window as any)[INJECTED_KEY]) {
@@ -105,12 +112,11 @@ function setMainWorldClickGate(active: boolean) {
     dbg('main-world-gate', active ? 'ON' : 'OFF');
     window.postMessage({ __docextClickGate: active }, '*');
     if (active) {
-      // Safety valve: never leave gate stuck ON if a promise chain stalls.
-      // Must be longer than the highlight-prompt auto-dismiss (4000ms) + full BG pipeline (~800ms).
+      // Safety valve: never leave the gate stuck ON if a promise chain stalls.
       gateSafetyTimer = window.setTimeout(() => {
         window.postMessage({ __docextClickGate: false }, '*');
         gateSafetyTimer = null;
-      }, 6000);
+      }, GATE_SAFETY_TIMEOUT_MS);
     }
   } catch {}
 }

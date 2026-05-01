@@ -27,7 +27,11 @@ export async function uploadScreenshotBlob(
   blob: Blob
 ): Promise<string> {
   const formData = new FormData();
-  formData.append('screenshot', blob, 'screenshot.webp');
+  // Pick a filename that matches the actual blob type so the server can
+  // distinguish a WebP fallback from a PNG fallback in logs. The server
+  // re-encodes either way, so this is purely informational.
+  const ext = blob.type === 'image/png' ? 'png' : 'webp';
+  formData.append('screenshot', blob, `screenshot.${ext}`);
 
   const res = await fetch(`${BASE_URL}/sessions/${sessionId}/screenshots`, {
     method: 'POST',

@@ -4,7 +4,7 @@ import path from 'path';
 import archiver from 'archiver';
 import { Writable } from 'stream';
 import type { Step, Session } from '@docext/shared';
-import { getScreenshotPath, screenshotExists } from './screenshot-store.js';
+import { getScreenshotPath, screenshotExists, readScreenshotEnsuringWebp } from './screenshot-store.js';
 import { db, schema } from '../db/index.js';
 import { eq, inArray } from 'drizzle-orm';
 
@@ -19,10 +19,10 @@ async function loadScreenshotBase64(screenshotId: string): Promise<string | null
   });
   if (!row) return null;
 
-  const fullPath = getScreenshotPath(row.filePath);
   if (!screenshotExists(row.filePath)) return null;
 
-  const buffer = await fsp.readFile(fullPath);
+  // Self-heal disguised files before embedding them as data URLs.
+  const buffer = await readScreenshotEnsuringWebp(row.filePath);
   return `data:image/webp;base64,${buffer.toString('base64')}`;
 }
 
@@ -153,18 +153,28 @@ export async function exportZip(
     archive.append(content, { name: `documentation.${ext}` });
 
     // Add screenshot files with friendly names (step01-light.webp / step01-dark.webp).
-    for (const row of screenshotRows) {
-      const zipName = idToZipName.get(row.id);
-      if (!zipName) continue;
-      const fullPath = getScreenshotPath(row.filePath);
-      if (fs.existsSync(fullPath)) {
-        archive.file(fullPath, {
-          name: `screenshots/${zipName}`,
-        });
-      }
-    }
-
-    archive.finalize();
+    // We validate each file's magic bytes before adding to the archive — any
+    // file that's silently TIFF/PNG/etc. on disk gets re-encoded in place so
+    // the ZIP only ever contains real WebP under .webp filenames.
+    Promise.all(
+      screenshotRows.map(async (row) => {
+        const zipName = idToZipName.get(row.id);
+        if (!zipName) return;
+        const fullPath = getScreenshotPath(row.filePath);
+        if (!fs.existsSync(fullPath)) return;
+        try {
+          const buf = await readScreenshotEnsuringWebp(row.filePath);
+          archive.append(buf, { name: `screenshots/${zipName}` });
+        } catch (err) {
+          console.warn('[docext] Skipping invalid screenshot in export:', row.filePath, err);
+        }
+      })
+    )
+      .then(() => archive.finalize())
+      .catch((err) => {
+        archive.abort();
+        reject(err);
+      });
   });
 }
 

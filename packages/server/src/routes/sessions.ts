@@ -563,6 +563,14 @@ sessionsRouter.post('/:id/merge-steps', async (req, res) => {
     // Delete the original steps
     await db.delete(schema.steps).where(inArray(schema.steps.id, groupIds));
 
+    // Any other step that linked to one of the deleted ids now points at a
+    // ghost — clear those references so the editor doesn't render orphan
+    // merge prompts.
+    await db
+      .update(schema.steps)
+      .set({ mergeWithNextId: null })
+      .where(inArray(schema.steps.mergeWithNextId, groupIds));
+
     // Re-number remaining steps
     const remaining = await db
       .select()

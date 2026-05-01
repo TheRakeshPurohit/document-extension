@@ -44,6 +44,8 @@ sqlite.exec(`
     screenshot_id TEXT,
     alt_screenshot_id TEXT,
     source_event_ids TEXT NOT NULL DEFAULT '[]',
+    sub_steps TEXT NOT NULL DEFAULT '[]',
+    merge_with_next_id TEXT,
     is_edited INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS screenshots (
