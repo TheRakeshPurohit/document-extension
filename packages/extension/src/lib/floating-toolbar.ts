@@ -174,6 +174,19 @@ export function createFloatingToolbar(editMode: boolean, onEditToggle: () => voi
         padding: 4px 11px;
       }
       button.no-btn:hover { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
+      button.screenshot {
+        padding: 5px 9px;
+        color: #475569;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      button.screenshot:hover { background: #f1f5f9; border-color: #cbd5e1; }
+      button.screenshot.capturing {
+        opacity: 0.6;
+        cursor: default;
+        pointer-events: none;
+      }
     </style>
     <div class="wrap">
       <div class="confirm-row" id="confirm-row">
@@ -188,6 +201,13 @@ export function createFloatingToolbar(editMode: boolean, onEditToggle: () => voi
         <div class="sep"></div>
         <button id="edit">${editMode ? '✎ Done Editing' : '✎ Edit Page'}</button>
         <div class="sep"></div>
+        <button id="screenshot" class="screenshot" title="Capture screenshot">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+            <circle cx="12" cy="13" r="4"></circle>
+          </svg>
+        </button>
+        <div class="sep"></div>
         <button id="cancel" class="cancel">✕ Cancel</button>
         <button id="stop" class="stop">■ Stop</button>
       </div>
@@ -201,6 +221,17 @@ export function createFloatingToolbar(editMode: boolean, onEditToggle: () => voi
     safeSendMessage({ type: 'CANCEL_RECORDING' });
   });
   toolbarShadow.getElementById('edit')!.addEventListener('click', onEditToggle);
+
+  toolbarShadow.getElementById('screenshot')!.addEventListener('click', () => {
+    const btn = toolbarShadow!.getElementById('screenshot')!;
+    if (btn.classList.contains('capturing')) return;
+    btn.classList.add('capturing');
+    safeSendMessage({ type: 'CAPTURE_SCREENSHOT' }).then(() => {
+      btn.classList.remove('capturing');
+    }).catch(() => {
+      btn.classList.remove('capturing');
+    });
+  });
 
   toolbarShadow.getElementById('confirm-yes')!.addEventListener('click', () => {
     const cb = promptOnYes;

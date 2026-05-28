@@ -185,7 +185,8 @@ export type ExtensionMessageType =
   | 'RESUME_CAPTURE'
   | 'HIDE_TOOLBAR'
   | 'SHOW_TOOLBAR'
-  | 'GET_STATE';
+  | 'GET_STATE'
+  | 'CAPTURE_SCREENSHOT';
 
 export interface ExtensionMessage {
   type: ExtensionMessageType;

@@ -932,6 +932,11 @@ chrome.runtime.onMessage.addListener(
           await persistState();
           return getState();
         }
+        case 'CAPTURE_SCREENSHOT': {
+          if (!state.isRecording) return { error: 'Not recording' };
+          const { mainId, altId } = await captureDualScreenshots();
+          return { ok: true, mainId, altId };
+        }
         default:
           return { error: 'Unknown message type' };
       }
