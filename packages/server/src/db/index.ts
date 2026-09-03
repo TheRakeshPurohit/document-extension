@@ -33,6 +33,9 @@ sqlite.exec(`
     metadata TEXT NOT NULL,
     screenshot_id TEXT,
     alt_screenshot_id TEXT,
+    after_screenshot_id TEXT,
+    after_alt_screenshot_id TEXT,
+    dom_edits TEXT,
     sort_order INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS steps (
@@ -43,10 +46,16 @@ sqlite.exec(`
     description TEXT NOT NULL DEFAULT '',
     screenshot_id TEXT,
     alt_screenshot_id TEXT,
+    before_light_id TEXT,
+    before_dark_id TEXT,
+    after_light_id TEXT,
+    after_dark_id TEXT,
     source_event_ids TEXT NOT NULL DEFAULT '[]',
     sub_steps TEXT NOT NULL DEFAULT '[]',
     merge_with_next_id TEXT,
-    is_edited INTEGER NOT NULL DEFAULT 0
+    is_edited INTEGER NOT NULL DEFAULT 0,
+    theme_capture TEXT,
+    highlights TEXT
   );
   CREATE TABLE IF NOT EXISTS screenshots (
     id TEXT PRIMARY KEY,
@@ -54,18 +63,38 @@ sqlite.exec(`
     file_path TEXT NOT NULL,
     created_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS session_edits (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    selector TEXT NOT NULL,
+    original TEXT NOT NULL,
+    modified TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'text',
+    url TEXT,
+    created_at INTEGER NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
   CREATE INDEX IF NOT EXISTS idx_events_session_order ON events(session_id, sort_order);
   CREATE INDEX IF NOT EXISTS idx_steps_session ON steps(session_id);
   CREATE INDEX IF NOT EXISTS idx_steps_session_order ON steps(session_id, sort_order);
   CREATE INDEX IF NOT EXISTS idx_screenshots_session ON screenshots(session_id);
+  CREATE INDEX IF NOT EXISTS idx_session_edits_session ON session_edits(session_id);
 `);
 
 // Add columns to existing tables (safe to fail if already present)
 try { sqlite.exec('ALTER TABLE events ADD COLUMN alt_screenshot_id TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE events ADD COLUMN after_screenshot_id TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE events ADD COLUMN after_alt_screenshot_id TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE events ADD COLUMN dom_edits TEXT'); } catch {}
 try { sqlite.exec('ALTER TABLE steps ADD COLUMN alt_screenshot_id TEXT'); } catch {}
 try { sqlite.exec("ALTER TABLE steps ADD COLUMN sub_steps TEXT NOT NULL DEFAULT '[]'"); } catch {}
 try { sqlite.exec('ALTER TABLE steps ADD COLUMN merge_with_next_id TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE steps ADD COLUMN before_light_id TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE steps ADD COLUMN before_dark_id TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE steps ADD COLUMN after_light_id TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE steps ADD COLUMN after_dark_id TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE steps ADD COLUMN theme_capture TEXT'); } catch {}
+try { sqlite.exec('ALTER TABLE steps ADD COLUMN highlights TEXT'); } catch {}
 
 export const db = drizzle(sqlite, { schema });
 

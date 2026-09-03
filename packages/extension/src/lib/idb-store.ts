@@ -39,6 +39,16 @@ export async function storeEvent(event: RecordedEvent): Promise<void> {
   });
 }
 
+export async function getEvent(eventId: string): Promise<RecordedEvent | undefined> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(EVENTS_STORE, 'readonly');
+    const req = tx.objectStore(EVENTS_STORE).get(eventId);
+    req.onsuccess = () => resolve(req.result as RecordedEvent | undefined);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 export async function updateEventSkipHighlight(eventId: string): Promise<void> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -48,9 +58,34 @@ export async function updateEventSkipHighlight(eventId: string): Promise<void> {
     req.onsuccess = () => {
       const event = req.result as RecordedEvent | undefined;
       if (event) {
-        // EventMetadata is a discriminated union without an index signature; cast
-        // through `unknown` so we can attach skipHighlight regardless of variant.
         (event.metadata as unknown as Record<string, unknown>).skipHighlight = true;
+        store.put(event);
+      }
+      resolve();
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function updateEventAfterScreenshots(
+  eventId: string,
+  afterScreenshotId: string | null,
+  afterAltScreenshotId: string | null,
+  afterOutcome?: unknown,
+): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(EVENTS_STORE, 'readwrite');
+    const store = tx.objectStore(EVENTS_STORE);
+    const req = store.get(eventId);
+    req.onsuccess = () => {
+      const event = req.result as RecordedEvent | undefined;
+      if (event) {
+        if (afterScreenshotId) event.afterScreenshotId = afterScreenshotId;
+        if (afterAltScreenshotId) event.afterAltScreenshotId = afterAltScreenshotId;
+        if (afterOutcome) {
+          (event.metadata as unknown as Record<string, unknown>).afterOutcome = afterOutcome;
+        }
         store.put(event);
       }
       resolve();
@@ -89,6 +124,36 @@ export async function getAllScreenshots(): Promise<Array<{ id: string; blob: Blo
   });
 }
 
+/** Fetch only the screenshot blobs referenced by the given ids. */
+export async function getScreenshotsByIds(
+  ids: string[],
+): Promise<Array<{ id: string; blob: Blob }>> {
+  if (ids.length === 0) return [];
+  const unique = [...new Set(ids)];
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SCREENSHOTS_STORE, 'readonly');
+    const store = tx.objectStore(SCREENSHOTS_STORE);
+    const results: Array<{ id: string; blob: Blob }> = [];
+    let pending = unique.length;
+    let failed = false;
+    for (const id of unique) {
+      const req = store.get(id);
+      req.onsuccess = () => {
+        if (req.result) results.push(req.result as { id: string; blob: Blob });
+        pending--;
+        if (pending === 0 && !failed) resolve(results);
+      };
+      req.onerror = () => {
+        if (!failed) {
+          failed = true;
+          reject(req.error);
+        }
+      };
+    }
+  });
+}
+
 export async function clearAll(): Promise<void> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -121,4 +186,9 @@ export async function deleteByIds(
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+}
+
+export async function hasPendingData(): Promise<boolean> {
+  const events = await getAllEvents();
+  return events.length > 0;
 }

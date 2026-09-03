@@ -52,14 +52,14 @@ export async function saveScreenshot(
   buffer: Buffer
 ): Promise<string> {
   const sessionDir = path.join(SCREENSHOTS_DIR, sessionId);
-  fs.mkdirSync(sessionDir, { recursive: true });
+  await fs.promises.mkdir(sessionDir, { recursive: true });
 
   const filePath = path.join(sessionDir, `${screenshotId}.webp`);
   // If the caller already produced WebP bytes (e.g. an annotated buffer from
   // screenshot-annotator), accept them; otherwise force a re-encode here so
   // every file on disk is guaranteed-WebP.
   const out = isWebpBuffer(buffer) ? buffer : await encodeAsWebp(buffer);
-  fs.writeFileSync(filePath, out);
+  await fs.promises.writeFile(filePath, out);
 
   return `${sessionId}/${screenshotId}.webp`;
 }

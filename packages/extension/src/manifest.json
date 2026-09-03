@@ -2,9 +2,17 @@
   "manifest_version": 3,
   "name": "DocExt - Document Extension",
   "description": "Record browser actions and generate step-by-step documentation with highlighted clicks in screenshots",
-  "version": "0.1.0",
-  "permissions": ["activeTab", "tabs", "scripting", "storage", "webNavigation"],
-  "host_permissions": ["<all_urls>"],
+  "version": "0.2.0",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "action": {
     "default_popup": "src/popup/index.html",
     "default_icon": {
@@ -19,14 +27,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["observer-patch.js"],
-      "run_at": "document_start",
-      "world": "MAIN"
-    },
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start"
     }
   ],

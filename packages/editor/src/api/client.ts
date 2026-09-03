@@ -64,3 +64,14 @@ export function getExportUrl(id: string) {
 export function getScreenshotUrl(screenshotId: string) {
   return `/api/screenshots/${screenshotId}`;
 }
+
+export function getSessionEdits(id: string) {
+  return request<{ edits: Array<{
+    id: string;
+    selector: string;
+    original: string;
+    modified: string;
+    kind: string;
+    url?: string;
+  }> }>(`/sessions/${id}/edits`);
+}

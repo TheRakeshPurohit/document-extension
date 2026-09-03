@@ -19,6 +19,7 @@ screenshotsRouter.get('/:id', async (req, res) => {
     // Validate magic bytes; if the file on disk is silently TIFF/PNG/etc.
     // it's re-encoded in place once and then served as guaranteed WebP.
     const buffer = await readScreenshotEnsuringWebp(row.filePath);
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
     res.type('image/webp').send(buffer);
   } catch (err) {
     res.status(500).json({ error: 'Failed to get screenshot' });

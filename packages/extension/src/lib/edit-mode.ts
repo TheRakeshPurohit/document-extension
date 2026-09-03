@@ -39,11 +39,22 @@ let domSnapshot: WeakMap<Node, string> = new WeakMap();
 let activeEditable: HTMLElement | null = null;
 let selectedElement: HTMLElement | null = null;
 let domEdits: DomEdit[] = [];
+let currentSessionId: string | null = null;
 
 const persistedEdits: Map<string, PersistedEdit> = new Map();
 let editGuardObserver: MutationObserver | null = null;
 let applyingEdits = false;
 let editGuardDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+function editsStorageKey(): string {
+  const origin = location.origin || 'unknown';
+  const sid = currentSessionId || 'nosession';
+  return `docext_edits:${sid}:${origin}`;
+}
+
+export function setEditSessionId(sessionId: string | null) {
+  currentSessionId = sessionId;
+}
 
 // ── Public Getters ──
 
@@ -312,15 +323,27 @@ export function startEditGuard() {
   editGuardObserver = new MutationObserver((mutations) => {
     if (applyingEdits) return;
     let hasNewNodes = false;
+    let themeAttrChange = false;
     for (const m of mutations) {
       if (m.addedNodes.length > 0) { hasNewNodes = true; break; }
+      if (
+        m.type === 'attributes' &&
+        (m.attributeName === 'class' || m.attributeName === 'data-theme' || m.attributeName === 'data-color-scheme')
+      ) {
+        themeAttrChange = true;
+      }
     }
-    scheduleEditGuard(hasNewNodes);
+    scheduleEditGuard(hasNewNodes || themeAttrChange);
   });
-  editGuardObserver.observe(document.body, { childList: true, subtree: true });
+  editGuardObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class', 'data-theme', 'data-color-scheme'],
+  });
 }
 
-export function stopEditGuard() {
+export function stopEditGuard(opts?: { wipeStorage?: boolean }) {
   if (editGuardDebounceTimer) {
     clearTimeout(editGuardDebounceTimer);
     editGuardDebounceTimer = null;
@@ -333,33 +356,52 @@ export function stopEditGuard() {
     editGuardObserver.disconnect();
     editGuardObserver = null;
   }
-  persistedEdits.clear();
-  chrome.storage.local.remove('docext_edits').catch(() => {});
+  const wipe = opts?.wipeStorage !== false;
+  if (wipe) {
+    persistedEdits.clear();
+    chrome.storage.local.remove(editsStorageKey()).catch(() => {});
+    chrome.storage.local.remove('docext_edits').catch(() => {});
+  }
 }
 
 function saveEditsToStorage() {
+  const key = editsStorageKey();
   if (persistedEdits.size === 0) {
-    chrome.storage.local.remove('docext_edits').catch(() => {});
+    chrome.storage.local.remove(key).catch(() => {});
     return;
   }
   const data: Record<string, PersistedEdit> = {};
   for (const [k, v] of persistedEdits) data[k] = v;
-  chrome.storage.local.set({ docext_edits: data }).catch(() => {});
+  chrome.storage.local.set({ [key]: data }).catch(() => {});
 }
 
 export async function loadEditsFromStorage() {
   try {
-    const result = await chrome.storage.local.get('docext_edits');
-    const stored = result?.docext_edits as Record<string, PersistedEdit> | undefined;
+    const key = editsStorageKey();
+    let result = await chrome.storage.local.get(key);
+    let stored = result?.[key] as Record<string, PersistedEdit> | undefined;
+    // Migrate legacy global key once
+    if (!stored) {
+      const legacy = await chrome.storage.local.get('docext_edits');
+      stored = legacy?.docext_edits as Record<string, PersistedEdit> | undefined;
+      if (stored) {
+        await chrome.storage.local.set({ [key]: stored });
+        await chrome.storage.local.remove('docext_edits');
+      }
+    }
     if (!stored) return;
     for (const [selector, edit] of Object.entries(stored)) {
       if (edit && edit.modified && edit.tag) {
         persistedEdits.set(selector, edit);
-        // Re-hydrate the domEdits array so click events captured AFTER a page
-        // refresh still carry the historical edit list (otherwise clicks would
-        // appear to undo the edits when replayed for documentation).
-        if (edit.modified !== '___DELETED___') {
-          domEdits.push({ selector, original: edit.original, modified: edit.modified });
+        if (edit.modified !== DELETED_SENTINEL) {
+          domEdits.push({ selector, original: edit.original, modified: edit.modified, kind: 'text' });
+        } else {
+          domEdits.push({
+            selector,
+            original: edit.original,
+            modified: DELETED_SENTINEL,
+            kind: 'hide',
+          });
         }
       }
     }
@@ -367,8 +409,6 @@ export async function loadEditsFromStorage() {
 
     applyPersistedEdits();
 
-    // Retry at increasing intervals to catch elements that render late
-    // (SSR hydration, lazy-loaded components, async data fetching)
     const retryDelays = [100, 500, 1500];
     for (const delay of retryDelays) {
       setTimeout(() => {
@@ -376,7 +416,6 @@ export async function loadEditsFromStorage() {
       }, delay);
     }
 
-    // Final retry after page fully loads
     if (document.readyState !== 'complete') {
       window.addEventListener('load', () => {
         setTimeout(() => {
@@ -385,6 +424,24 @@ export async function loadEditsFromStorage() {
       }, { once: true });
     }
   } catch { /* storage unavailable in some contexts */ }
+}
+
+/** Snapshot of edits suitable for uploading to the session. */
+export function getDomEditsForFlush(): DomEdit[] {
+  const out: DomEdit[] = [];
+  for (const [selector, edit] of persistedEdits) {
+    out.push({
+      selector,
+      original: edit.original,
+      modified: edit.modified,
+      kind: edit.modified === DELETED_SENTINEL ? 'hide' : 'text',
+    });
+  }
+  // Also include in-memory text edits not yet in persisted map
+  for (const e of domEdits) {
+    if (!out.some((o) => o.selector === e.selector)) out.push(e);
+  }
+  return out;
 }
 
 // ── Text Target Resolution ──
@@ -473,7 +530,7 @@ function commitActiveEditable() {
   const original = (el.firstChild ? domSnapshot.get(el.firstChild) : null) || '';
   const modified = el.textContent || '';
   if (original !== modified) {
-    domEdits.push({ selector: info.selector, original, modified });
+    domEdits.push({ selector: info.selector, original, modified, kind: 'text' });
     persistedEdits.set(info.selector, {
       original,
       modified,
@@ -531,6 +588,12 @@ function handleEditKeydown(e: KeyboardEvent) {
       tag: el.tagName.toLowerCase(),
       ancestorPath: getAncestorPath(el),
       ancestorSignature: getAncestorSignature(el),
+    });
+    domEdits.push({
+      selector,
+      original: (el.textContent || '').trim(),
+      modified: DELETED_SENTINEL,
+      kind: 'hide',
     });
     saveEditsToStorage();
     return;

@@ -82,30 +82,61 @@ export function resumeMutationObserver() {
 
 export function setupMutationObserver() {
   if (mutationObserver) return;
+  const trackedModals = new WeakSet<Element>();
   mutationObserver = new MutationObserver((mutations) => {
     if (capturePausedFn?.()) return;
     if (Date.now() - lastClickSentAt < CLICK_COOLDOWN_MS) return;
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (!(node instanceof HTMLElement)) continue;
-        if (isModalElement(node)) {
+        // Cheap attribute check before getComputedStyle
+        const looksModal =
+          node.tagName === 'DIALOG' ||
+          node.getAttribute('role') === 'dialog' ||
+          node.getAttribute('role') === 'alertdialog' ||
+          node.getAttribute('aria-modal') === 'true' ||
+          node.classList.contains('modal') ||
+          node.classList.contains('Modal');
+        if (looksModal && isModalElement(node)) {
+          trackedModals.add(node);
           lastClickSentAt = Date.now();
           sendEventFn?.(buildModalEvent('open', node));
           return;
         }
         const dialog = node.querySelector('[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]');
         if (dialog instanceof HTMLElement && isModalElement(dialog)) {
+          trackedModals.add(dialog);
           lastClickSentAt = Date.now();
           sendEventFn?.(buildModalEvent('open', dialog));
           return;
         }
       }
 
+      for (const node of mutation.removedNodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        const looksModal =
+          node.tagName === 'DIALOG' ||
+          node.getAttribute('role') === 'dialog' ||
+          node.getAttribute('role') === 'alertdialog' ||
+          node.getAttribute('aria-modal') === 'true';
+        if (looksModal || trackedModals.has(node)) {
+          lastClickSentAt = Date.now();
+          sendEventFn?.(buildModalEvent('close', node));
+          return;
+        }
+      }
+
       if (mutation.type === 'attributes' && mutation.target instanceof HTMLElement) {
         const target = mutation.target;
-        if (mutation.attributeName === 'open' && target.tagName === 'DIALOG' && target.hasAttribute('open')) {
-          lastClickSentAt = Date.now();
-          sendEventFn?.(buildModalEvent('open', target));
+        if (mutation.attributeName === 'open' && target.tagName === 'DIALOG') {
+          if (target.hasAttribute('open')) {
+            trackedModals.add(target);
+            lastClickSentAt = Date.now();
+            sendEventFn?.(buildModalEvent('open', target));
+          } else {
+            lastClickSentAt = Date.now();
+            sendEventFn?.(buildModalEvent('close', target));
+          }
         }
       }
     }
@@ -128,7 +159,7 @@ export function startSpaObserver(callbacks: SpaObserverCallbacks) {
   window.addEventListener('hashchange', checkUrlChange);
   patchHistory();
   setupMutationObserver();
-  urlObserverInterval = setInterval(checkUrlChange, 500);
+  // No polling interval — history patches + popstate/hashchange cover SPA nav
 }
 
 export function stopSpaObserver() {

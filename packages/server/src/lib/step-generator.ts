@@ -7,6 +7,9 @@ import type {
   NavigateMeta,
   SubmitMeta,
   ModalMeta,
+  ScreenshotMeta,
+  AfterOutcome,
+  ParentContext,
   Step,
   SubStep,
 } from '@docext/shared';
@@ -23,6 +26,10 @@ interface RawStep {
   description: string;
   screenshotId?: string;
   altScreenshotId?: string;
+  beforeLightId?: string;
+  beforeDarkId?: string;
+  afterLightId?: string;
+  afterDarkId?: string;
   sourceEventIds: string[];
   timestamp: number;
   url?: string;
@@ -33,6 +40,7 @@ interface RawStep {
   containerRole?: string;
   subSteps?: SubStep[];
   mergeWithNextId?: string;
+  themeCapture?: 'dual' | 'same';
 }
 
 function truncate(text: string, max = 50): string {
@@ -57,7 +65,17 @@ function humanizeId(id: string): string {
     .trim();
 }
 
-function locationHint(meta: { containerRole?: string; sectionLabel?: string; nearestHeading?: string; parentId?: string; parentName?: string; viewportHint?: string }): string {
+function locationHint(meta: {
+  containerRole?: string;
+  sectionLabel?: string;
+  nearestHeading?: string;
+  parentId?: string;
+  parentName?: string;
+  parent?: ParentContext;
+  viewportHint?: string;
+}): string {
+  if (meta.parent?.name) return ` in the ${truncate(cleanLabel(meta.parent.name), 30)} area`;
+  if (meta.parentName) return ` in the ${truncate(meta.parentName, 30)} area`;
   if (meta.sectionLabel) return ` in the ${cleanLabel(meta.sectionLabel)} section`;
   if (meta.containerRole === 'navigation') return ' in the navigation';
   if (meta.containerRole === 'toolbar') return ' in the toolbar';
@@ -68,7 +86,6 @@ function locationHint(meta: { containerRole?: string; sectionLabel?: string; nea
   if (meta.containerRole === 'sidebar') return ' in the sidebar';
   if (meta.containerRole === 'form') return ' in the form';
   if (meta.containerRole === 'search') return ' in the search area';
-  if (meta.parentName) return ` in the ${truncate(meta.parentName, 30)} area`;
   if (meta.parentId) {
     const name = humanizeId(meta.parentId);
     if (name.length > 1) return ` in the ${name} section`;
@@ -86,6 +103,7 @@ function ordinal(n: number): string {
 const SENSITIVE_FIELDS = /password|secret|token|ssn|credit.?card|cvv|pin|social.?security/i;
 
 function bestLabel(m: ClickMeta): string {
+  if (m.accessibleName) return m.accessibleName;
   if (m.ariaLabel) return m.ariaLabel;
   if (m.elementText && m.elementText.length > 1 && m.elementText !== m.elementTag) return m.elementText;
   if (m.fieldLabel) return m.fieldLabel;
@@ -94,6 +112,34 @@ function bestLabel(m: ClickMeta): string {
   if (m.parentText && m.parentText.length > 1) return m.parentText;
   if (m.parentName && m.parentName.length > 1) return m.parentName;
   return '';
+}
+
+function descriptionForAfterOutcome(ao: AfterOutcome): string {
+  if (ao.openOverlayName) {
+    const name = cleanLabel(ao.openOverlayName);
+    if (ao.outcome === 'opened-dialog' || /dialog|modal|popup/i.test(name)) {
+      return `Opens the ${name}`;
+    }
+    return `Opens the ${name}`;
+  }
+  switch (ao.outcome) {
+    case 'expanded':
+      return 'Expands the control';
+    case 'collapsed':
+      return 'Collapses the control';
+    case 'navigated':
+      return ao.newHeading
+        ? `Navigates to ${quote(ao.newHeading)}`
+        : 'Navigates to a new page';
+    case 'submitted':
+      return 'Submits the form';
+    case 'toggled':
+      return 'Toggles the control';
+    case 'opened-dialog':
+      return 'Opens a dialog';
+    default:
+      return '';
+  }
 }
 
 function titleForClick(m: ClickMeta): string {
@@ -234,6 +280,10 @@ function descriptionForEvent(event: RecordedEvent, title: string): string {
   switch (event.type) {
     case 'click': {
       const m = meta as ClickMeta;
+      if (m.afterOutcome) {
+        const outcomeDesc = descriptionForAfterOutcome(m.afterOutcome);
+        if (outcomeDesc) return outcomeDesc;
+      }
       if (m.breadcrumb) parts.push(`Found in ${m.breadcrumb}`);
       if (m.viewportHint && !alreadyInTitle(tl, m.viewportHint)) {
         parts.push(`Located in the ${m.viewportHint}`);
@@ -242,8 +292,9 @@ function descriptionForEvent(event: RecordedEvent, title: string): string {
         const [pos, total] = m.listPosition.split(' of ');
         parts.push(`${ordinal(Number(pos))} item in a list of ${total}`);
       }
-      if (m.parentName && !alreadyInTitle(tl, m.parentName)) {
-        parts.push(`Inside the "${truncate(m.parentName, 40)}" area`);
+      const parentLabel = m.parent?.name || m.parentName;
+      if (parentLabel && !alreadyInTitle(tl, parentLabel)) {
+        parts.push(`Inside the "${truncate(parentLabel, 40)}" area`);
       }
       if (m.nearbyText && !alreadyInTitle(tl, m.nearbyText)) {
         parts.push(`Next to "${truncate(m.nearbyText, 40)}"`);
@@ -389,21 +440,33 @@ export function generateSteps(
       case 'modal':
         title = titleForModal(primaryEvent.metadata as ModalMeta);
         break;
+      case 'screenshot': {
+        const sm = primaryEvent.metadata as ScreenshotMeta;
+        title = sm.label?.trim() ? cleanLabel(sm.label) : 'Captured screenshot';
+        break;
+      }
       default:
         title = `Action: ${primaryEvent.type}`;
     }
 
     const lastEvent = group[group.length - 1];
-    const screenshotId = lastEvent.screenshotId ?? primaryEvent.screenshotId;
-    const altScreenshotId = lastEvent.altScreenshotId ?? primaryEvent.altScreenshotId;
+    // Keep screenshotId as the before-light id for grouping / annotation source
+    const beforeLightId = lastEvent.screenshotId ?? primaryEvent.screenshotId;
+    const beforeDarkId = lastEvent.altScreenshotId ?? primaryEvent.altScreenshotId;
+    const afterLightId = lastEvent.afterScreenshotId ?? primaryEvent.afterScreenshotId;
+    const afterDarkId = lastEvent.afterAltScreenshotId ?? primaryEvent.afterAltScreenshotId;
     const description = descriptionForEvent(primaryEvent, title);
 
-    const meta = primaryEvent.metadata as ClickMeta & InputMeta & SelectMeta;
+    const meta = primaryEvent.metadata as ClickMeta & InputMeta & SelectMeta & ScreenshotMeta & NavigateMeta & ModalMeta;
     rawSteps.push({
       title,
       description,
-      screenshotId,
-      altScreenshotId,
+      screenshotId: beforeLightId,
+      altScreenshotId: beforeDarkId,
+      beforeLightId,
+      beforeDarkId,
+      afterLightId,
+      afterDarkId,
       sourceEventIds: group.map((e) => e.id),
       timestamp: primaryEvent.timestamp,
       url: primaryEvent.url,
@@ -412,6 +475,7 @@ export function generateSteps(
       viewportSize: meta.viewportSize,
       inEphemeralUI: (meta as ClickMeta).inEphemeralUI || undefined,
       containerRole: (meta as ClickMeta).containerRole || undefined,
+      themeCapture: meta.themeCapture,
     });
   }
 
@@ -427,16 +491,14 @@ export function generateSteps(
       // Same exact title within 3s: merge, keep later screenshots
       if (sameTitleExact && timeDiff < 3000) {
         prev.sourceEventIds.push(...step.sourceEventIds);
-        if (step.screenshotId) prev.screenshotId = step.screenshotId;
-        if (step.altScreenshotId) prev.altScreenshotId = step.altScreenshotId;
+        adoptLaterShots(prev, step);
         continue;
       }
 
       // Similar title within 1s: merge, keep longer title and later screenshots
       if (sameTitleNorm && timeDiff < 1000) {
         prev.sourceEventIds.push(...step.sourceEventIds);
-        if (step.screenshotId) prev.screenshotId = step.screenshotId;
-        if (step.altScreenshotId) prev.altScreenshotId = step.altScreenshotId;
+        adoptLaterShots(prev, step);
         if (step.title.length > prev.title.length) prev.title = step.title;
         continue;
       }
@@ -454,8 +516,7 @@ export function generateSteps(
           prev.title = step.title;
           prev.description = step.description;
           prev.sourceEventIds.push(...step.sourceEventIds);
-          if (step.screenshotId) prev.screenshotId = step.screenshotId;
-          if (step.altScreenshotId) prev.altScreenshotId = step.altScreenshotId;
+          adoptLaterShots(prev, step);
           continue;
         }
       }
@@ -477,14 +538,29 @@ export function generateSteps(
     description: raw.description,
     screenshotId: raw.screenshotId,
     altScreenshotId: raw.altScreenshotId,
+    beforeLightId: raw.beforeLightId,
+    beforeDarkId: raw.beforeDarkId,
+    afterLightId: raw.afterLightId,
+    afterDarkId: raw.afterDarkId,
     sourceEventIds: raw.sourceEventIds,
     isEdited: false,
     subSteps: raw.subSteps,
+    themeCapture: raw.themeCapture,
     // Resolve sentinel "__merge_N" → the real UUID of step at position N
     mergeWithNextId: raw.mergeWithNextId?.startsWith('__merge_')
       ? ids[parseInt(raw.mergeWithNextId.slice('__merge_'.length), 10)]
       : undefined,
   }));
+}
+
+function adoptLaterShots(prev: RawStep, step: RawStep): void {
+  if (step.screenshotId) prev.screenshotId = step.screenshotId;
+  if (step.altScreenshotId) prev.altScreenshotId = step.altScreenshotId;
+  if (step.beforeLightId) prev.beforeLightId = step.beforeLightId;
+  if (step.beforeDarkId) prev.beforeDarkId = step.beforeDarkId;
+  if (step.afterLightId) prev.afterLightId = step.afterLightId;
+  if (step.afterDarkId) prev.afterDarkId = step.afterDarkId;
+  if (step.themeCapture) prev.themeCapture = step.themeCapture;
 }
 
 const SCROLL_THRESHOLD = 50;
@@ -587,6 +663,7 @@ function groupSameAreaSteps(steps: RawStep[]): RawStep[] {
     }));
 
     const firstStep = group[0];
+    const lastStep = group[group.length - 1];
     const loc = findGroupLocationHint(group);
     const groupTitle = loc
       ? `Perform ${group.length} actions ${loc}`
@@ -599,12 +676,17 @@ function groupSameAreaSteps(steps: RawStep[]): RawStep[] {
       // so it shows the page state the user sees when starting this sequence.
       screenshotId: firstStep.screenshotId,
       altScreenshotId: firstStep.altScreenshotId,
+      beforeLightId: firstStep.beforeLightId ?? firstStep.screenshotId,
+      beforeDarkId: firstStep.beforeDarkId ?? firstStep.altScreenshotId,
+      afterLightId: lastStep.afterLightId,
+      afterDarkId: lastStep.afterDarkId,
       sourceEventIds: group.flatMap((s) => s.sourceEventIds),
       timestamp: group[0].timestamp,
       url: current.url,
       elementRect: current.elementRect,
       viewportSize: current.viewportSize,
       scrollPosition: current.scrollPosition,
+      themeCapture: firstStep.themeCapture,
       subSteps,
     });
 
@@ -672,6 +754,7 @@ function detectMergeableGroups(steps: RawStep[]): RawStep[] {
 /**
  * Merge a group of steps (trigger + 1-2 ephemerals) into a single step.
  * Uses the LAST step's screenshot (popup/overlay is open so all elements visible).
+ * Trigger before shots stay as before*; last (popup) shot is after* and annotation source.
  * Returns the merged RawStep, or null if the group is invalid.
  */
 export function mergeStepGroup(group: RawStep[]): RawStep | null {
@@ -686,17 +769,26 @@ export function mergeStepGroup(group: RawStep[]): RawStep | null {
   const last = group[group.length - 1];
   const first = group[0];
 
+  // Annotate from the last (popup) screenshot; keep trigger's raw before shots
+  const annotateLight = last.beforeLightId ?? last.screenshotId;
+  const annotateDark = last.beforeDarkId ?? last.altScreenshotId;
+
   return {
     title: last.title,
     description: last.description,
-    screenshotId: last.screenshotId,
-    altScreenshotId: last.altScreenshotId,
+    screenshotId: annotateLight,
+    altScreenshotId: annotateDark,
+    beforeLightId: first.beforeLightId ?? first.screenshotId,
+    beforeDarkId: first.beforeDarkId ?? first.altScreenshotId,
+    afterLightId: last.afterLightId ?? annotateLight,
+    afterDarkId: last.afterDarkId ?? annotateDark,
     sourceEventIds: group.flatMap((s) => s.sourceEventIds),
     timestamp: first.timestamp,
     url: first.url,
     elementRect: last.elementRect,
     viewportSize: last.viewportSize || first.viewportSize,
     scrollPosition: last.scrollPosition || first.scrollPosition,
+    themeCapture: first.themeCapture || last.themeCapture,
     subSteps,
   };
 }

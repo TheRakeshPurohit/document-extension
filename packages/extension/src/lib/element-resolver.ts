@@ -105,21 +105,113 @@ function getPlaceholder(el: Element): string | undefined {
   return undefined;
 }
 
-function getNearestHeading(el: Element): string | undefined {
-  let current: Element | null = el;
-  let depth = 0;
-  while (current && depth < 8) {
-    const heading: Element | null = current.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]');
-    if (heading && heading !== el) {
-      const text = (heading.textContent || '').trim();
-      if (text && text.length < 80) return text;
+function isHeadingElement(el: Element): boolean {
+  const tag = el.tagName.toLowerCase();
+  if (/^h[1-6]$/.test(tag)) return true;
+  return el.getAttribute('role') === 'heading';
+}
+
+function headingText(el: Element): string | undefined {
+  const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+  if (text && text.length < 80) return text;
+  return undefined;
+}
+
+/** Last heading in document order within a limited sibling subtree (no large-ancestor querySelector). */
+function findLastPrecedingHeading(root: Element): Element | null {
+  let found: Element | null = null;
+  const walk = (node: Element, depth: number) => {
+    if (depth > 6) return;
+    if (isHeadingElement(node)) found = node;
+    for (const child of node.children) {
+      walk(child, depth + 1);
+    }
+  };
+  walk(root, 0);
+  return found;
+}
+
+/**
+ * Prefer a heading that precedes the control in the same container,
+ * then aria-labelledby / aria-label on ancestors, then preceding headings
+ * while walking up. Never querySelector headings on large ancestors.
+ */
+export function getNearestHeading(el: Element): string | undefined {
+  try {
+    // 1. Preceding siblings in the same container
+    let sibling = el.previousElementSibling;
+    while (sibling) {
+      if (isHeadingElement(sibling)) {
+        const t = headingText(sibling);
+        if (t) return t;
+      }
+      const nested = findLastPrecedingHeading(sibling);
+      if (nested) {
+        const t = headingText(nested);
+        if (t) return t;
+      }
+      sibling = sibling.previousElementSibling;
     }
 
-    const ariaLabel = current.getAttribute('aria-label');
-    if (ariaLabel && ariaLabel.length < 80 && current !== el) return ariaLabel;
+    // 2. aria-labelledby / aria-label on ancestors
+    let current: Element | null = el.parentElement;
+    let depth = 0;
+    while (current && depth < 8) {
+      const labelledBy = current.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const parts = labelledBy
+          .split(/\s+/)
+          .map((id) => {
+            try {
+              return document.getElementById(id)?.textContent?.replace(/\s+/g, ' ').trim();
+            } catch {
+              return undefined;
+            }
+          })
+          .filter((t): t is string => Boolean(t));
+        if (parts.length > 0) {
+          const joined = parts.join(' ');
+          if (joined.length < 80) return joined;
+        }
+      }
+      const ariaLabel = current.getAttribute('aria-label');
+      if (ariaLabel && ariaLabel.length < 80) return ariaLabel;
 
-    current = current.parentElement;
-    depth++;
+      current = current.parentElement;
+      depth++;
+    }
+
+    // 3. Walk up: look for preceding sibling headings of each ancestor
+    current = el.parentElement;
+    depth = 0;
+    while (current && depth < 8) {
+      const tag = current.tagName.toLowerCase();
+      if (tag === 'body' || tag === 'html') break;
+
+      if (isHeadingElement(current)) {
+        const t = headingText(current);
+        if (t) return t;
+      }
+
+      let sib = current.previousElementSibling;
+      while (sib) {
+        if (isHeadingElement(sib)) {
+          const t = headingText(sib);
+          if (t) return t;
+        }
+        const nested = findLastPrecedingHeading(sib);
+        if (nested) {
+          const t = headingText(nested);
+          if (t) return t;
+        }
+        sib = sib.previousElementSibling;
+      }
+
+      current = current.parentElement;
+      depth++;
+    }
+  } catch {
+    /* detached or cross-origin */
   }
   return undefined;
 }

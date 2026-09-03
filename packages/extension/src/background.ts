@@ -1,6 +1,6 @@
 import type { RecordedEvent, RecordingState, ExtensionMessage, ClickMeta } from '@docext/shared';
-import { storeEvent, updateEventSkipHighlight, storeScreenshot, getAllEvents, getAllScreenshots, clearAll, deleteByIds } from './lib/idb-store.js';
-import { createSession, uploadEvents, uploadScreenshotBlob, finalizeSession, deleteSession } from './lib/api-client.js';
+import { storeEvent, updateEventSkipHighlight, updateEventAfterScreenshots, storeScreenshot, getAllEvents, getScreenshotsByIds, clearAll, deleteByIds, hasPendingData } from './lib/idb-store.js';
+import { createSession, uploadEvents, uploadScreenshotBlob, finalizeSession, deleteSession, uploadDomEdits, patchSkipHighlight } from './lib/api-client.js';
 
 // ── Configuration ──
 
@@ -9,7 +9,7 @@ const NAVIGATE_LOAD_TIMEOUT_MS = 8000;
 const CLICK_SCREENSHOT_DELAY_MS = 10;
 const BATCH_INTERVAL_MS = 30_000;
 const UPLOAD_CONCURRENCY = 4;
-const NAVIGATE_RENDER_DELAY_MS = 3500;
+const NAVIGATE_RENDER_DELAY_MS = 700;
 
 // ── Sequential Event Queue ──
 
@@ -28,12 +28,19 @@ async function drainEventQueue() {
   processingEvent = true;
   while (eventQueue.length > 0) {
     const item = eventQueue.shift()!;
+    let acked = false;
+    const earlyAck = () => {
+      if (!acked) {
+        acked = true;
+        item.resolve();
+      }
+    };
     try {
-      await handleEventCaptured(item.event);
+      await handleEventCaptured(item.event, earlyAck);
     } catch (err) {
       console.error('[docext] Event queue error:', err);
     }
-    item.resolve();
+    earlyAck(); // ensure resolve even if capture path forgot
   }
   processingEvent = false;
 }
@@ -178,28 +185,35 @@ function broadcastState() {
 async function hideToolbar() {
   if (!activeTabId) return;
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId: activeTabId },
-      func: () => {
-        const el = document.getElementById('docext-toolbar');
-        if (el) el.style.display = 'none';
-      },
-    });
-    await new Promise((r) => setTimeout(r, 30));
-  } catch { /* tab closed or restricted */ }
+    await chrome.tabs.sendMessage(activeTabId, { type: 'HIDE_TOOLBAR' } as ExtensionMessage);
+  } catch {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: activeTabId },
+        func: () => {
+          const el = document.getElementById('docext-toolbar');
+          if (el) el.style.display = 'none';
+        },
+      });
+    } catch { /* tab closed or restricted */ }
+  }
 }
 
 async function showToolbar() {
   if (!activeTabId) return;
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId: activeTabId },
-      func: () => {
-        const el = document.getElementById('docext-toolbar');
-        if (el) el.style.display = '';
-      },
-    });
-  } catch { /* tab closed or restricted */ }
+    await chrome.tabs.sendMessage(activeTabId, { type: 'SHOW_TOOLBAR' } as ExtensionMessage);
+  } catch {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: activeTabId },
+        func: () => {
+          const el = document.getElementById('docext-toolbar');
+          if (el) el.style.display = '';
+        },
+      });
+    } catch { /* tab closed or restricted */ }
+  }
 }
 
 // ── Screenshot Capture ──
@@ -208,10 +222,11 @@ async function showToolbar() {
 // "currently visible" tab. If the user switches tabs mid-recording we'd
 // otherwise toggle theme on the recording tab and capture an unrelated one.
 async function captureWindow(): Promise<string> {
+  const opts: chrome.tabs.CaptureVisibleTabOptions = { format: 'jpeg', quality: 90 };
   if (activeWindowId != null) {
-    return chrome.tabs.captureVisibleTab(activeWindowId, { format: 'png' });
+    return chrome.tabs.captureVisibleTab(activeWindowId, opts);
   }
-  return chrome.tabs.captureVisibleTab({ format: 'png' });
+  return chrome.tabs.captureVisibleTab(opts);
 }
 
 async function toWebp(blob: Blob): Promise<Blob> {
@@ -220,15 +235,23 @@ async function toWebp(blob: Blob): Promise<Blob> {
   const ctx = canvas.getContext('2d')!;
   ctx.drawImage(bmp, 0, 0);
   bmp.close();
-  const out = await canvas.convertToBlob({ type: 'image/webp', quality: 1 });
-  // Per the Canvas spec, if the browser doesn't support a requested type,
-  // convertToBlob silently falls back to image/png. The server validates
-  // magic bytes, but warning here makes the fallback observable in the
-  // extension logs and prevents `.webp`-named PNGs from going unnoticed.
+  const out = await canvas.convertToBlob({ type: 'image/webp', quality: 0.85 });
   if (out.type !== 'image/webp') {
     console.warn('[docext] OffscreenCanvas.convertToBlob did not produce WebP, got:', out.type);
   }
   return out;
+}
+
+/** Cheap sample of blob bytes for identical-frame detection. */
+async function sampleBlobHash(blob: Blob): Promise<string> {
+  const slice = blob.slice(0, Math.min(blob.size, 4096));
+  const buf = await slice.arrayBuffer();
+  const view = new Uint8Array(buf);
+  let h = blob.size;
+  for (let i = 0; i < view.length; i += 17) {
+    h = ((h * 31) + view[i]) >>> 0;
+  }
+  return `${blob.size}:${h}`;
 }
 
 // ── Page Observer Pausing ──
@@ -239,7 +262,7 @@ async function pausePageObservers() {
     await chrome.scripting.executeScript({
       target: { tabId: activeTabId },
       world: 'MAIN',
-      func: () => (window as any).__docext_pauseObservers?.(),
+      func: () => (window as unknown as { __docext_pauseObservers?: () => void }).__docext_pauseObservers?.(),
     });
   } catch {}
 }
@@ -250,7 +273,7 @@ async function resumePageObservers() {
     await chrome.scripting.executeScript({
       target: { tabId: activeTabId },
       world: 'MAIN',
-      func: () => (window as any).__docext_resumeObservers?.(),
+      func: () => (window as unknown as { __docext_resumeObservers?: () => void }).__docext_resumeObservers?.(),
     });
   } catch {}
 }
@@ -269,23 +292,16 @@ async function resumeContentCapture() {
 
 /**
  * After toggling the theme, wait for the browser to actually commit the paint.
- * Strategy:
- *  1. Execute a requestAnimationFrame inside the page — resolves after the next
- *     composited paint, meaning all CSS recalculations are done.
- *  2. Optionally verify that the dark-class/attribute is present (retry up to 3×
- *     with 16 ms gaps if the message round-trip was slow).
  */
 async function waitForThemePaint(targetTheme: 'light' | 'dark' | 'system'): Promise<void> {
   if (!activeTabId) return;
   try {
-    // Flush paint via rAF in the page context.
     await chrome.scripting.executeScript({
       target: { tabId: activeTabId },
       world: 'MAIN',
       func: () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
     });
 
-    // Verify the dark theme is actually applied (retry loop for slow round-trips).
     if (targetTheme === 'dark') {
       for (let attempt = 0; attempt < 3; attempt++) {
         const [result] = await chrome.scripting.executeScript({
@@ -327,14 +343,17 @@ async function setEmulatedTheme(theme: 'light' | 'dark' | 'system') {
           if (t === 'dark') {
             html.classList.add('dark');
             html.setAttribute('data-theme', 'dark');
+            html.setAttribute('data-color-scheme', 'dark');
             html.style.colorScheme = 'dark';
           } else if (t === 'light') {
             html.classList.remove('dark');
             html.setAttribute('data-theme', 'light');
+            html.setAttribute('data-color-scheme', 'light');
             html.style.colorScheme = 'light';
           } else {
             html.classList.remove('dark');
             html.removeAttribute('data-theme');
+            html.removeAttribute('data-color-scheme');
             html.style.colorScheme = '';
           }
         },
@@ -355,16 +374,17 @@ interface RawDualCapture {
   lightRaw: Blob | null;
   darkRaw: Blob | null;
   fallbackRaw: Blob | null;
+  themeCapture: 'dual' | 'same';
 }
 
 async function captureRawDual(themeSettleMs = 300, darkSettleMs = 300): Promise<RawDualCapture> {
-  const result: RawDualCapture = { lightRaw: null, darkRaw: null, fallbackRaw: null };
+  const result: RawDualCapture = { lightRaw: null, darkRaw: null, fallbackRaw: null, themeCapture: 'dual' };
   const originalTheme = state.theme;
-  // One paint frame is ~16ms; 20ms gives margin for the browser to repaint
   const paintFrame = 20;
 
   try {
     await hideToolbar();
+    await pauseContentCapture();
 
     if (activeTabId) {
       try {
@@ -373,37 +393,64 @@ async function captureRawDual(themeSettleMs = 300, darkSettleMs = 300): Promise<
         const needsLightSwitch = originalTheme !== 'light';
         if (needsLightSwitch) {
           await setEmulatedTheme('light');
-          await new Promise((r) => setTimeout(r, Math.max(themeSettleMs, paintFrame)));
           await waitForThemePaint('light');
+          // Fallback settle if paint verification alone is too fast for CSS transitions
+          await new Promise((r) => setTimeout(r, Math.min(themeSettleMs, 120)));
         }
 
         const lightDataUrl = await captureWindow();
         result.lightRaw = await (await globalThis.fetch(lightDataUrl)).blob();
 
+        // Start encoding light while dark theme settles
+        const lightEncodePromise = toWebp(result.lightRaw).then(async (webp) => {
+          const id = `ss-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          await storeScreenshot(id, webp);
+          return id;
+        }).catch(() => null);
+
         await setEmulatedTheme('dark');
-        await new Promise((r) => setTimeout(r, Math.max(darkSettleMs, paintFrame)));
         await waitForThemePaint('dark');
+        await new Promise((r) => setTimeout(r, Math.min(darkSettleMs, 200)));
 
         const darkDataUrl = await captureWindow();
         result.darkRaw = await (await globalThis.fetch(darkDataUrl)).blob();
 
+        // Identical-frame detection
+        try {
+          const [lh, dh] = await Promise.all([
+            sampleBlobHash(result.lightRaw),
+            sampleBlobHash(result.darkRaw),
+          ]);
+          if (lh === dh) {
+            result.themeCapture = 'same';
+            result.darkRaw = null;
+          }
+        } catch { /* keep dual */ }
+
         await setEmulatedTheme(originalTheme === 'system' ? 'system' : originalTheme);
         await new Promise((r) => setTimeout(r, paintFrame));
         await resumePageObservers();
-
+        await resumeContentCapture();
         await showToolbar();
+
+        // Attach pre-encoded light id if available (consumed by processRawDual via pending)
+        (result as RawDualCapture & { _pendingLightId?: Promise<string | null> })._pendingLightId = lightEncodePromise;
         return result;
       } catch (err) {
         console.warn('[docext] Dual-theme capture failed, falling back:', err);
         try { await setEmulatedTheme(originalTheme === 'system' ? 'system' : originalTheme); } catch {}
         await resumePageObservers();
+        await resumeContentCapture();
       }
     }
 
     const dataUrl = await captureWindow();
     result.fallbackRaw = await (await globalThis.fetch(dataUrl)).blob();
+    result.themeCapture = 'same';
+    await resumeContentCapture();
     await showToolbar();
   } catch (err) {
+    await resumeContentCapture();
     await showToolbar();
     console.warn('[docext] Raw screenshot capture failed:', err);
   }
@@ -412,19 +459,25 @@ async function captureRawDual(themeSettleMs = 300, darkSettleMs = 300): Promise<
 }
 
 async function processRawDual(
-  raw: RawDualCapture,
-): Promise<{ mainId: string | null; altId: string | null }> {
+  raw: RawDualCapture & { _pendingLightId?: Promise<string | null> },
+): Promise<{ mainId: string | null; altId: string | null; themeCapture: 'dual' | 'same' }> {
   let mainId: string | null = null;
   let altId: string | null = null;
 
   try {
     if (raw.lightRaw && raw.darkRaw) {
+      const pendingLight = raw._pendingLightId;
       const [lId, dId] = await Promise.all([
-        storeFinalScreenshot(raw.lightRaw),
+        pendingLight ? pendingLight.then((id) => id || storeFinalScreenshot(raw.lightRaw!)) : storeFinalScreenshot(raw.lightRaw),
         storeFinalScreenshot(raw.darkRaw),
       ]);
       mainId = lId;
       altId = dId;
+    } else if (raw.lightRaw) {
+      const pendingLight = raw._pendingLightId;
+      mainId = pendingLight
+        ? (await pendingLight) || await storeFinalScreenshot(raw.lightRaw)
+        : await storeFinalScreenshot(raw.lightRaw);
     } else if (raw.fallbackRaw) {
       mainId = await storeFinalScreenshot(raw.fallbackRaw);
     }
@@ -432,12 +485,12 @@ async function processRawDual(
     console.warn('[docext] Screenshot processing failed:', err);
   }
 
-  return { mainId, altId };
+  return { mainId, altId, themeCapture: raw.themeCapture };
 }
 
 async function captureDualScreenshots(
   themeSettleMs = 300,
-): Promise<{ mainId: string | null; altId: string | null }> {
+): Promise<{ mainId: string | null; altId: string | null; themeCapture: 'dual' | 'same' }> {
   const raw = await captureRawDual(themeSettleMs);
   return processRawDual(raw);
 }
@@ -449,18 +502,48 @@ function sortEventsForUpload(events: RecordedEvent[]): RecordedEvent[] {
   });
 }
 
+function collectScreenshotIds(events: RecordedEvent[]): string[] {
+  const ids: string[] = [];
+  for (const ev of events) {
+    if (ev.screenshotId) ids.push(ev.screenshotId);
+    if (ev.altScreenshotId) ids.push(ev.altScreenshotId);
+    if (ev.afterScreenshotId) ids.push(ev.afterScreenshotId);
+    if (ev.afterAltScreenshotId) ids.push(ev.afterAltScreenshotId);
+  }
+  return ids;
+}
+
+function assignScreenshotField(
+  event: RecordedEvent,
+  field: 'screenshotId' | 'altScreenshotId' | 'afterScreenshotId' | 'afterAltScreenshotId',
+  remoteId: string,
+) {
+  event[field] = remoteId;
+}
+
 // ── Event Processing ──
 
-async function handleEventCaptured(event: RecordedEvent) {
+async function handleEventCaptured(event: RecordedEvent, earlyAck?: () => void) {
   dbg('handleEventCaptured:start', event.type, event.id);
   const isClick = event.type === 'click';
   const isNavigate = event.type === 'navigate';
   const isModal = event.type === 'modal';
+  const isScreenshot = event.type === 'screenshot';
   const isEphemeralClick = isClick && !!(event.metadata as ClickMeta | undefined)?.inEphemeralUI;
-  const shouldCaptureScreenshot = isClick || isNavigate || isModal;
+  const shouldCaptureScreenshot = isClick || isNavigate || isModal || isScreenshot;
   if (event.url) lastKnownUrl = event.url;
 
   try {
+    // Skip recapture when screenshots were already attached (cross-origin nav, manual)
+    if (event.screenshotId) {
+      await storeEvent(event);
+      state.eventCount++;
+      await persistState();
+      broadcastState();
+      earlyAck?.();
+      return;
+    }
+
     if (isNavigate && activeTabId) {
       await waitForTabLoad(activeTabId, NAVIGATE_LOAD_TIMEOUT_MS);
       await new Promise((r) => setTimeout(r, NAVIGATE_RENDER_DELAY_MS));
@@ -473,19 +556,26 @@ async function handleEventCaptured(event: RecordedEvent) {
       await storeEvent(event);
       state.eventCount++;
       broadcastState();
+      earlyAck?.();
       return;
     }
 
     const rawCapture = await captureRawDual(
       isNavigate ? 800 : 300,
-      isEphemeralClick ? 300 : 300,
+      isEphemeralClick ? 300 : 200,
     );
     dbg('captureRawDual:done', event.type, event.id);
 
+    // Release the click gate as soon as raw pixels exist — encode can finish after replay.
+    earlyAck?.();
+
     try {
-      const { mainId, altId } = await processRawDual(rawCapture);
+      const { mainId, altId, themeCapture } = await processRawDual(rawCapture);
       if (mainId) event.screenshotId = mainId;
       if (altId) event.altScreenshotId = altId;
+      if (themeCapture === 'same') {
+        (event.metadata as ClickMeta).themeCapture = 'same';
+      }
       await storeEvent(event);
       dbg('storeEvent:done', event.type, event.id, { screenshotId: !!event.screenshotId, altScreenshotId: !!event.altScreenshotId });
       state.eventCount++;
@@ -497,7 +587,26 @@ async function handleEventCaptured(event: RecordedEvent) {
     }
   } catch (err) {
     console.warn('[docext] Event capture failed:', err);
+    earlyAck?.();
     try { await storeEvent(event); state.eventCount++; await persistState(); broadcastState(); } catch {}
+  }
+}
+
+async function handleCaptureAfter(
+  eventId: string,
+  afterOutcome?: unknown,
+): Promise<{ ok: boolean }> {
+  try {
+    const raw = await captureRawDual(200, 200);
+    const { mainId, altId, themeCapture } = await processRawDual(raw);
+    if (themeCapture === 'same' && afterOutcome && typeof afterOutcome === 'object') {
+      (afterOutcome as Record<string, unknown>).themeCapture = 'same';
+    }
+    await updateEventAfterScreenshots(eventId, mainId, altId, afterOutcome);
+    return { ok: true };
+  } catch (err) {
+    console.warn('[docext] After-click capture failed:', err);
+    return { ok: false };
   }
 }
 
@@ -526,11 +635,26 @@ async function startRecording(tab: chrome.tabs.Tab) {
   }
 
   lastKnownUrl = tab.url || '';
-  await clearAll();
+  // Only clear IDB if there is no leftover data from a prior failed force-flush
+  const pending = await hasPendingData();
+  if (!pending) {
+    await clearAll();
+  } else {
+    console.warn('[docext] Preserving unflushed IDB data from prior session');
+  }
   failedUploadIds.clear();
   await persistState();
 
   if (activeTabId) {
+    try {
+      // Inject observer-patch into MAIN world only while recording
+      await chrome.scripting.executeScript({
+        target: { tabId: activeTabId, allFrames: true },
+        files: ['observer-patch.js'],
+        world: 'MAIN',
+      });
+    } catch { /* may already be present */ }
+
     try {
       await chrome.scripting.executeScript({
         target: { tabId: activeTabId, allFrames: true },
@@ -541,7 +665,10 @@ async function startRecording(tab: chrome.tabs.Tab) {
     await new Promise((r) => setTimeout(r, 50));
 
     try {
-      await chrome.tabs.sendMessage(activeTabId, { type: 'START_RECORDING' } as ExtensionMessage);
+      await chrome.tabs.sendMessage(activeTabId, {
+        type: 'START_RECORDING',
+        payload: getState(),
+      } as ExtensionMessage);
     } catch (err) {
       console.warn('[docext] Failed to send START_RECORDING:', err);
     }
@@ -562,7 +689,7 @@ async function captureFinalScreenshots(): Promise<void> {
     let tab: chrome.tabs.Tab | undefined;
     try { tab = await chrome.tabs.get(activeTabId); } catch { return; }
 
-    const { mainId: ssId, altId } = await captureDualScreenshots(500);
+    const { mainId: ssId, altId, themeCapture } = await captureDualScreenshots(500);
 
     const event: RecordedEvent = {
       id: `final-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -570,7 +697,7 @@ async function captureFinalScreenshots(): Promise<void> {
       timestamp: Date.now(),
       url: tab?.url || '',
       pageTitle: tab?.title || '',
-      metadata: { fromUrl: '', toUrl: tab?.url || '', newTitle: tab?.title || '' },
+      metadata: { fromUrl: '', toUrl: tab?.url || '', newTitle: tab?.title || '', themeCapture },
       screenshotId: ssId ?? undefined,
       altScreenshotId: altId ?? undefined,
     };
@@ -695,7 +822,8 @@ async function uploadScreenshotsParallel(
   events: RecordedEvent[],
   ssMap: Map<string, Blob>,
 ): Promise<{ failedLocalIds: Set<string> }> {
-  const tasks: Array<{ event: RecordedEvent; field: 'screenshotId' | 'altScreenshotId'; localId: string }> = [];
+  type SsField = 'screenshotId' | 'altScreenshotId' | 'afterScreenshotId' | 'afterAltScreenshotId';
+  const tasks: Array<{ event: RecordedEvent; field: SsField; localId: string }> = [];
 
   for (const event of events) {
     if (event.screenshotId && ssMap.has(event.screenshotId)) {
@@ -703,6 +831,12 @@ async function uploadScreenshotsParallel(
     }
     if (event.altScreenshotId && ssMap.has(event.altScreenshotId)) {
       tasks.push({ event, field: 'altScreenshotId', localId: event.altScreenshotId });
+    }
+    if (event.afterScreenshotId && ssMap.has(event.afterScreenshotId)) {
+      tasks.push({ event, field: 'afterScreenshotId', localId: event.afterScreenshotId });
+    }
+    if (event.afterAltScreenshotId && ssMap.has(event.afterAltScreenshotId)) {
+      tasks.push({ event, field: 'afterAltScreenshotId', localId: event.afterAltScreenshotId });
     }
   }
 
@@ -739,73 +873,74 @@ async function uploadScreenshotsParallel(
   for (const t of tasks) {
     const remoteId = idMap.get(t.localId);
     if (remoteId) {
-      (t.event as any)[t.field] = remoteId;
+      assignScreenshotField(t.event, t.field, remoteId);
     }
-    // Keep local-id reference if upload failed so the next flush can retry.
-    // Don't blank the field — the event already wasn't uploaded yet anyway.
   }
 
   return { failedLocalIds };
 }
 
-async function flushToBackend() {
+async function syncBatch(opts?: { retries?: number }): Promise<void> {
   if (!state.sessionId || state.sessionId.startsWith('local-')) return;
   if (flushing) return;
   flushing = true;
 
+  const maxAttempts = opts?.retries ?? 1;
   try {
-    const events = sortEventsForUpload(await getAllEvents());
-    if (events.length === 0) return;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const events = sortEventsForUpload(await getAllEvents());
+      if (events.length === 0) return;
 
-    const screenshots = await getAllScreenshots();
-    const ssMap = new Map(screenshots.map((s) => [s.id, s.blob]));
+      const ssIds = collectScreenshotIds(events);
+      const screenshots = await getScreenshotsByIds(ssIds);
+      const ssMap = new Map(screenshots.map((s) => [s.id, s.blob]));
 
-    const { failedLocalIds } = await uploadScreenshotsParallel(state.sessionId!, events, ssMap);
+      const { failedLocalIds } = await uploadScreenshotsParallel(state.sessionId!, events, ssMap);
 
-    // Skip uploading any event whose required screenshot blob never made it
-    // (we'll retry the whole event on the next interval).
-    const stuckEvents = new Set<string>();
-    for (const ev of events) {
-      if (ev.screenshotId && failedLocalIds.has(ev.screenshotId)) stuckEvents.add(ev.id);
-      if (ev.altScreenshotId && failedLocalIds.has(ev.altScreenshotId)) stuckEvents.add(ev.id);
-    }
-    const uploadable = events.filter((e) => !stuckEvents.has(e.id));
-
-    if (uploadable.length > 0) {
-      await uploadEvents(state.sessionId!, uploadable);
-    }
-
-    // Selectively remove only the rows we successfully synced.
-    const eventIdsToDelete = uploadable.map((e) => e.id);
-    const usedSsIds = new Set<string>();
-    for (const ev of uploadable) {
-      if (ev.screenshotId) usedSsIds.add(ev.screenshotId);
-      if (ev.altScreenshotId) usedSsIds.add(ev.altScreenshotId);
-    }
-    // Note: above ids point to REMOTE ids after upload mutates events. Local ssMap
-    // keys are local. We need the local ids — re-derive from screenshots that were
-    // not in failedLocalIds and that no remaining stuck event still references.
-    const stuckLocalSsIds = new Set<string>();
-    for (const ev of events) {
-      if (stuckEvents.has(ev.id)) {
-        if (ev.screenshotId) stuckLocalSsIds.add(ev.screenshotId);
-        if (ev.altScreenshotId) stuckLocalSsIds.add(ev.altScreenshotId);
+      const stuckEvents = new Set<string>();
+      for (const ev of events) {
+        if (ev.screenshotId && failedLocalIds.has(ev.screenshotId)) stuckEvents.add(ev.id);
+        if (ev.altScreenshotId && failedLocalIds.has(ev.altScreenshotId)) stuckEvents.add(ev.id);
+        if (ev.afterScreenshotId && failedLocalIds.has(ev.afterScreenshotId)) stuckEvents.add(ev.id);
+        if (ev.afterAltScreenshotId && failedLocalIds.has(ev.afterAltScreenshotId)) stuckEvents.add(ev.id);
       }
-    }
-    const ssIdsToDelete = [...ssMap.keys()].filter(
-      (id) => !failedLocalIds.has(id) && !stuckLocalSsIds.has(id),
-    );
+      const uploadable = events.filter((e) => !stuckEvents.has(e.id));
 
-    await deleteByIds(eventIdsToDelete, ssIdsToDelete);
+      if (uploadable.length > 0) {
+        await uploadEvents(state.sessionId!, uploadable);
+      }
 
-    if (failedLocalIds.size > 0) {
-      console.warn('[docext] Some screenshots failed to upload, will retry next flush:', failedLocalIds.size);
+      const stuckLocalSsIds = new Set<string>();
+      for (const ev of events) {
+        if (stuckEvents.has(ev.id)) {
+          if (ev.screenshotId) stuckLocalSsIds.add(ev.screenshotId);
+          if (ev.altScreenshotId) stuckLocalSsIds.add(ev.altScreenshotId);
+          if (ev.afterScreenshotId) stuckLocalSsIds.add(ev.afterScreenshotId);
+          if (ev.afterAltScreenshotId) stuckLocalSsIds.add(ev.afterAltScreenshotId);
+        }
+      }
+      // After upload, events hold remote ids — delete the local blobs we successfully uploaded
+      const localIdsUploaded = [...ssMap.keys()].filter(
+        (id) => !failedLocalIds.has(id) && !stuckLocalSsIds.has(id),
+      );
+      await deleteByIds(uploadable.map((e) => e.id), localIdsUploaded);
+
+      if (failedLocalIds.size === 0) return;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+      } else {
+        console.warn('[docext] Some screenshots failed to upload, will retry next flush:', failedLocalIds.size);
+      }
     }
   } catch (err) {
     console.warn('[docext] Batch flush failed (will retry):', err);
   } finally {
     flushing = false;
   }
+}
+
+async function flushToBackend() {
+  await syncBatch({ retries: 1 });
 }
 
 async function waitForFlush() {
@@ -818,58 +953,8 @@ async function waitForFlush() {
 
 async function forceFlushToBackend() {
   await waitForFlush();
-
   if (!state.sessionId || state.sessionId.startsWith('local-')) return;
-
-  flushing = true;
-  try {
-    // Retry up to FORCE_FLUSH_ATTEMPTS times so a transient hiccup doesn't
-    // discard data on stop. The final attempt clears everything regardless.
-    const FORCE_FLUSH_ATTEMPTS = 3;
-    for (let attempt = 0; attempt < FORCE_FLUSH_ATTEMPTS; attempt++) {
-      const events = sortEventsForUpload(await getAllEvents());
-      if (events.length === 0) return;
-
-      const screenshots = await getAllScreenshots();
-      const ssMap = new Map(screenshots.map((s) => [s.id, s.blob]));
-
-      const { failedLocalIds } = await uploadScreenshotsParallel(state.sessionId!, events, ssMap);
-
-      const stuckEvents = new Set<string>();
-      for (const ev of events) {
-        if (ev.screenshotId && failedLocalIds.has(ev.screenshotId)) stuckEvents.add(ev.id);
-        if (ev.altScreenshotId && failedLocalIds.has(ev.altScreenshotId)) stuckEvents.add(ev.id);
-      }
-      const uploadable = events.filter((e) => !stuckEvents.has(e.id));
-      if (uploadable.length > 0) {
-        await uploadEvents(state.sessionId!, uploadable);
-      }
-
-      const stuckLocalSsIds = new Set<string>();
-      for (const ev of events) {
-        if (stuckEvents.has(ev.id)) {
-          if (ev.screenshotId) stuckLocalSsIds.add(ev.screenshotId);
-          if (ev.altScreenshotId) stuckLocalSsIds.add(ev.altScreenshotId);
-        }
-      }
-      const ssIdsToDelete = [...ssMap.keys()].filter(
-        (id) => !failedLocalIds.has(id) && !stuckLocalSsIds.has(id),
-      );
-      await deleteByIds(uploadable.map((e) => e.id), ssIdsToDelete);
-
-      if (failedLocalIds.size === 0) return;
-      // Brief backoff before the next try.
-      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
-    }
-
-    // Final attempt failed; preserve what we have rather than corrupt the SQLite
-    // session by uploading half-events. clearAll() is intentionally NOT called.
-    console.error('[docext] Force flush exhausted retries — leftover data will be retried on next session');
-  } catch (err) {
-    console.error('[docext] Force flush failed:', err);
-  } finally {
-    flushing = false;
-  }
+  await syncBatch({ retries: 3 });
 }
 
 // ── Message Listener ──
@@ -906,6 +991,14 @@ chrome.runtime.onMessage.addListener(
         case 'SET_SKIP_HIGHLIGHT': {
           const { eventId } = message.payload as { eventId: string };
           await updateEventSkipHighlight(eventId);
+          // Also flush to server if the event may already have been uploaded
+          if (state.sessionId && !state.sessionId.startsWith('local-')) {
+            try {
+              await patchSkipHighlight(state.sessionId, eventId);
+            } catch (err) {
+              console.warn('[docext] Server skip-highlight failed (will rely on IDB):', err);
+            }
+          }
           return { ok: true };
         }
         case 'ENTER_EDIT_MODE': {
@@ -934,8 +1027,59 @@ chrome.runtime.onMessage.addListener(
         }
         case 'CAPTURE_SCREENSHOT': {
           if (!state.isRecording) return { error: 'Not recording' };
-          const { mainId, altId } = await captureDualScreenshots();
-          return { ok: true, mainId, altId };
+          const { mainId, altId, themeCapture } = await captureDualScreenshots();
+          const event: RecordedEvent = {
+            id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            type: 'screenshot',
+            timestamp: Date.now(),
+            url: lastKnownUrl,
+            pageTitle: '',
+            metadata: {
+              label: 'Manual screenshot',
+              skipHighlight: true,
+              themeCapture,
+            },
+            screenshotId: mainId ?? undefined,
+            altScreenshotId: altId ?? undefined,
+          };
+          try {
+            const tab = activeTabId ? await chrome.tabs.get(activeTabId) : null;
+            if (tab) {
+              event.url = tab.url || event.url;
+              event.pageTitle = tab.title || '';
+            }
+          } catch { /* ignore */ }
+          await storeEvent(event);
+          state.eventCount++;
+          await persistState();
+          broadcastState();
+          return { ok: true, mainId, altId, eventId: event.id };
+        }
+        case 'CAPTURE_AFTER': {
+          if (!state.isRecording) return { error: 'Not recording' };
+          const payload = message.payload as { eventId: string; afterOutcome?: unknown };
+          return handleCaptureAfter(payload.eventId, payload.afterOutcome);
+        }
+        case 'FLUSH_DOM_EDITS': {
+          const payload = message.payload as {
+            edits: Array<{ selector: string; original: string; modified: string; kind?: string }>;
+            url?: string;
+          };
+          if (
+            state.sessionId &&
+            !state.sessionId.startsWith('local-') &&
+            payload?.edits?.length
+          ) {
+            try {
+              await uploadDomEdits(
+                state.sessionId,
+                payload.edits.map((e) => ({ ...e, url: payload.url })),
+              );
+            } catch (err) {
+              console.warn('[docext] Failed to upload dom edits:', err);
+            }
+          }
+          return { ok: true };
         }
         default:
           return { error: 'Unknown message type' };
@@ -959,13 +1103,26 @@ function injectAndStart(tabId: number, allFrames: boolean, frameIds?: number[]) 
   const target = frameIds ? { tabId, frameIds } : { tabId, allFrames };
   chrome.scripting.executeScript({
     target,
-    files: ['content.js'],
-  }).then(() => {
+    files: ['observer-patch.js'],
+    world: 'MAIN',
+  }).catch(() => {}).then(() =>
+    chrome.scripting.executeScript({
+      target,
+      files: ['content.js'],
+    })
+  ).then(() => {
     setTimeout(() => {
       chrome.tabs.sendMessage(tabId, {
         type: 'START_RECORDING',
         payload: getState(),
       } as ExtensionMessage).catch(() => {});
+      // Re-force light theme after navigation so dual capture stays dual
+      setEmulatedTheme('light').catch(() => {});
+      state.theme = 'light';
+      // Restore edit mode if it was active
+      if (state.editMode) {
+        chrome.tabs.sendMessage(tabId, { type: 'ENTER_EDIT_MODE' } as ExtensionMessage).catch(() => {});
+      }
     }, 50);
   }).catch(() => {});
 }
@@ -1015,7 +1172,7 @@ chrome.webNavigation?.onCompleted?.addListener(async (details) => {
     await new Promise((r) => setTimeout(r, 800));
     const tab = await chrome.tabs.get(details.tabId);
 
-    const { mainId, altId } = await captureDualScreenshots(500);
+    const { mainId, altId, themeCapture } = await captureDualScreenshots(500);
 
     const event: RecordedEvent = {
       id: `nav-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1023,12 +1180,16 @@ chrome.webNavigation?.onCompleted?.addListener(async (details) => {
       timestamp: Date.now(),
       url: newUrl,
       pageTitle: tab?.title || '',
-      metadata: { fromUrl: prevUrl, toUrl: newUrl, newTitle: tab?.title || '' },
+      metadata: { fromUrl: prevUrl, toUrl: newUrl, newTitle: tab?.title || '', themeCapture },
       screenshotId: mainId ?? undefined,
       altScreenshotId: altId ?? undefined,
     };
 
-    await enqueueEvent(event);
+    // Already has screenshots — store directly without recapture
+    await storeEvent(event);
+    state.eventCount++;
+    await persistState();
+    broadcastState();
   } catch (err) {
     console.warn('[docext] Cross-origin navigate capture failed:', err);
   } finally {

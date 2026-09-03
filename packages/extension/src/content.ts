@@ -13,13 +13,20 @@ import {
 } from './lib/event-filter.js';
 import { buildClickEvent, buildInputEvent, buildSelectEvent, buildSubmitEvent } from './lib/event-builders.js';
 import {
+  extractAfterState,
+  getElementStates,
+  extractPageFrame,
+} from './lib/page-extractor.js';
+import {
   enterEditMode,
   exitEditMode,
   isEditMode,
   getDomEdits,
+  getDomEditsForFlush,
   startEditGuard,
   stopEditGuard,
   loadEditsFromStorage,
+  setEditSessionId,
 } from './lib/edit-mode.js';
 import {
   createFloatingToolbar,
@@ -308,6 +315,76 @@ function isInsideEphemeralUI(el: Element): boolean {
   return false;
 }
 
+function shouldCaptureAfter(
+  target: Element,
+  beforeStates: ReturnType<typeof getElementStates>,
+  beforeUrl: string,
+  beforeOverlayCount: number,
+): { capture: boolean; outcome: ReturnType<typeof extractAfterState> } {
+  const outcome = extractAfterState(document.contains(target) ? target : null, beforeStates, beforeUrl);
+  if (outcome.outcome !== 'unknown') return { capture: true, outcome };
+  try {
+    const frame = extractPageFrame();
+    if (frame.openOverlays.length > beforeOverlayCount) {
+      return {
+        capture: true,
+        outcome: {
+          ...outcome,
+          outcome: 'opened-dialog',
+          openOverlayName: frame.openOverlays[0],
+        },
+      };
+    }
+    if (location.href !== beforeUrl) {
+      return { capture: true, outcome: { ...outcome, outcome: 'navigated', newUrl: location.href } };
+    }
+  } catch { /* ignore */ }
+  // aria-haspopup / data-state triggers often open UI without flipping our tracked states
+  if (
+    target.hasAttribute('aria-haspopup') ||
+    target.getAttribute('data-state') === 'closed' ||
+    target.getAttribute('aria-expanded') === 'true'
+  ) {
+    return { capture: true, outcome: { ...outcome, outcome: outcome.outcome === 'unknown' ? 'expanded' : outcome.outcome } };
+  }
+  return { capture: false, outcome };
+}
+
+function requestAfterCapture(eventId: string, outcome: ReturnType<typeof extractAfterState>) {
+  safeSendMessage({
+    type: 'CAPTURE_AFTER',
+    payload: { eventId, afterOutcome: outcome },
+  });
+}
+
+function afterReplayFlow(
+  target: Element,
+  label: string,
+  eventId: string,
+  beforeStates: ReturnType<typeof getElementStates>,
+  beforeUrl: string,
+  beforeOverlayCount: number,
+  ephemeral: boolean,
+) {
+  const settleMs = ephemeral ? 250 : 120;
+  window.setTimeout(() => {
+    const { capture, outcome } = shouldCaptureAfter(target, beforeStates, beforeUrl, beforeOverlayCount);
+    if (capture) {
+      requestAfterCapture(eventId, outcome);
+    }
+    if (isTopFrame) {
+      showHighlightPrompt(
+        label,
+        () => {},
+        () => safeSendMessage({ type: 'SET_SKIP_HIGHLIGHT', payload: { eventId } }),
+        () => {
+          if (!capture) requestAfterCapture(eventId, outcome);
+        },
+      );
+    }
+  }, settleMs);
+}
+
 function resolveReplayTarget(target: Element, selector?: string, coords?: { x: number; y: number }): Element | null {
   if (document.contains(target)) return target;
   if (selector) {
@@ -404,8 +481,17 @@ function handlePointerdown(e: PointerEvent) {
   });
 
   const ephemeral = isInsideEphemeralUI(target);
-  const capturedEvent = buildClickEvent(target, e, info, getDomEdits(), { inEphemeralUI: ephemeral || undefined });
-  const label = info.text || info.ariaLabel || info.fieldLabel || info.selector;
+  const capturedEvent = buildClickEvent(target, e, info, getDomEdits(), { inEphemeralUI: ephemeral || undefined, hotPath: true });
+  const label =
+    (capturedEvent.metadata as { accessibleName?: string }).accessibleName ||
+    info.text ||
+    info.ariaLabel ||
+    info.fieldLabel ||
+    info.selector;
+  const beforeStates = getElementStates(target);
+  const beforeUrl = location.href;
+  let beforeOverlayCount = 0;
+  try { beforeOverlayCount = extractPageFrame().openOverlays.length; } catch { /* ignore */ }
 
   const dispatchAndReplay = (ev: typeof capturedEvent) => {
     lastClickSentAt = Date.now();
@@ -428,25 +514,13 @@ function handlePointerdown(e: PointerEvent) {
     const fallback = { x: e.clientX, y: e.clientY };
     const eventId = ev.id;
 
-    const afterReplay = () => {
-      // Screenshot already captured — prompt is purely an annotation decision.
-      // Show after replay so ephemeral UI (hover menus, sidebars) has closed naturally.
-      if (isTopFrame) {
-        showHighlightPrompt(
-          label,
-          () => {}, // Yes: default — screenshot will be annotated
-          () => safeSendMessage({ type: 'SET_SKIP_HIGHLIGHT', payload: { eventId } }),
-        );
-      }
-    };
-
     promise
       .then(() => {
         releaseGateThenReplay(() => {
           lastClickSentAt = Date.now();
           setLastClickTimestamp(lastClickSentAt);
           replayFullChain(target, e, sel, fallback);
-          afterReplay();
+          afterReplayFlow(target, label, eventId, beforeStates, beforeUrl, beforeOverlayCount, ephemeral);
         }, ephemeral ? 90 : 24);
       })
       .catch(() => {
@@ -454,7 +528,7 @@ function handlePointerdown(e: PointerEvent) {
           lastClickSentAt = Date.now();
           setLastClickTimestamp(lastClickSentAt);
           replayFullChain(target, e, sel, fallback);
-          afterReplay();
+          afterReplayFlow(target, label, eventId, beforeStates, beforeUrl, beforeOverlayCount, ephemeral);
         }, ephemeral ? 90 : 24);
       });
   };
@@ -509,8 +583,20 @@ function handleClick(e: MouseEvent) {
   if (isDuplicateClick(info.selector, now)) return;
 
   const ephemeralFallback = isInsideEphemeralUI(target);
-  const capturedEvent = buildClickEvent(target, e, info, getDomEdits(), { inEphemeralUI: ephemeralFallback || undefined });
-  const label = info.text || info.ariaLabel || info.fieldLabel || info.selector;
+  const capturedEvent = buildClickEvent(target, e, info, getDomEdits(), {
+    inEphemeralUI: ephemeralFallback || undefined,
+    hotPath: true,
+  });
+  const label =
+    (capturedEvent.metadata as { accessibleName?: string }).accessibleName ||
+    info.text ||
+    info.ariaLabel ||
+    info.fieldLabel ||
+    info.selector;
+  const beforeStates = getElementStates(target);
+  const beforeUrl = location.href;
+  let beforeOverlayCount = 0;
+  try { beforeOverlayCount = extractPageFrame().openOverlays.length; } catch { /* ignore */ }
 
   e.preventDefault();
   e.stopImmediatePropagation();
@@ -529,13 +615,7 @@ function handleClick(e: MouseEvent) {
         lastClickSentAt = Date.now();
         setLastClickTimestamp(lastClickSentAt);
         replayClick(replayTarget, sel, fallback);
-        if (isTopFrame) {
-          showHighlightPrompt(
-            label,
-            () => {},
-            () => safeSendMessage({ type: 'SET_SKIP_HIGHLIGHT', payload: { eventId } }),
-          );
-        }
+        afterReplayFlow(replayTarget, label, eventId, beforeStates, beforeUrl, beforeOverlayCount, ephemeralFallback);
       }, ephemeralFallback ? 90 : 24);
     })
     .catch(() => {
@@ -543,13 +623,7 @@ function handleClick(e: MouseEvent) {
         lastClickSentAt = Date.now();
         setLastClickTimestamp(lastClickSentAt);
         replayClick(replayTarget, sel, fallback);
-        if (isTopFrame) {
-          showHighlightPrompt(
-            label,
-            () => {},
-            () => safeSendMessage({ type: 'SET_SKIP_HIGHLIGHT', payload: { eventId } }),
-          );
-        }
+        afterReplayFlow(replayTarget, label, eventId, beforeStates, beforeUrl, beforeOverlayCount, ephemeralFallback);
       }, ephemeralFallback ? 90 : 24);
     });
 }
@@ -595,6 +669,65 @@ function handleSubmit(e: Event) {
   sendEvent(buildSubmitEvent(form));
 }
 
+function handleKeydown(e: KeyboardEvent) {
+  if (!isRecording || isEditMode() || capturePaused || isReplayingClick) return;
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const active = document.activeElement;
+  if (!active || !(active instanceof HTMLElement)) return;
+  if (FORM_FIELD_TAGS.has(active.tagName.toLowerCase())) return;
+  if (isInsideToolbar(e)) return;
+  const target = resolveClickTarget(active);
+  if (!target) return;
+  // Treat keyboard activation like a click for documentation purposes
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  setMainWorldClickGate(true);
+  const info = resolveElement(target);
+  if (isDuplicateClick(info.selector, Date.now())) {
+    setMainWorldClickGate(false);
+    return;
+  }
+  const ephemeral = isInsideEphemeralUI(target);
+  const fakeEvent = new MouseEvent('click', {
+    bubbles: true,
+    cancelable: true,
+    clientX: target.getBoundingClientRect().left + 4,
+    clientY: target.getBoundingClientRect().top + 4,
+  });
+  const capturedEvent = buildClickEvent(target, fakeEvent, info, getDomEdits(), {
+    inEphemeralUI: ephemeral || undefined,
+    hotPath: true,
+  });
+  const label =
+    (capturedEvent.metadata as { accessibleName?: string }).accessibleName ||
+    info.text ||
+    info.ariaLabel ||
+    info.selector;
+  const beforeStates = getElementStates(target);
+  const beforeUrl = location.href;
+  let beforeOverlayCount = 0;
+  try { beforeOverlayCount = extractPageFrame().openOverlays.length; } catch { /* ignore */ }
+
+  lastClickSentAt = Date.now();
+  setLastClickTimestamp(lastClickSentAt);
+  safeSendMessage({ type: 'EVENT_CAPTURED', payload: capturedEvent })
+    .then(() => {
+      releaseGateThenReplay(() => {
+        isReplayingClick = true;
+        try {
+          if (typeof target.click === 'function') target.click();
+          else target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        } finally {
+          isReplayingClick = false;
+        }
+        afterReplayFlow(target, label, capturedEvent.id, beforeStates, beforeUrl, beforeOverlayCount, ephemeral);
+      }, ephemeral ? 90 : 24);
+    })
+    .catch(() => {
+      setMainWorldClickGate(false);
+    });
+}
+
 // ── Start/Stop Recording ──
 
 const isTopFrame = window === window.top;
@@ -613,6 +746,7 @@ function startRecording() {
   document.addEventListener('input', handleInput, true);
   document.addEventListener('change', handleChange, true);
   document.addEventListener('submit', handleSubmit, true);
+  document.addEventListener('keydown', handleKeydown, true);
 
   if (isTopFrame) {
     startSpaObserver({
@@ -633,7 +767,8 @@ function stopRecording() {
   isRecording = false;
 
   if (isTopFrame) {
-    stopEditGuard();
+    // Flush edits to server before clearing local storage
+    stopEditGuard({ wipeStorage: true });
     if (isEditMode()) exitEditMode();
   }
 
@@ -646,6 +781,7 @@ function stopRecording() {
   document.removeEventListener('input', handleInput, true);
   document.removeEventListener('change', handleChange, true);
   document.removeEventListener('submit', handleSubmit, true);
+  document.removeEventListener('keydown', handleKeydown, true);
 
   if (isTopFrame) {
     stopSpaObserver();
@@ -661,15 +797,30 @@ function stopRecording() {
 
 function messageHandler(message: ExtensionMessage, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) {
   switch (message.type) {
-    case 'START_RECORDING':
+    case 'START_RECORDING': {
+      const payload = message.payload as RecordingState | undefined;
+      if (payload?.sessionId) setEditSessionId(payload.sessionId);
       startRecording();
+      if (payload?.editMode) enterEditMode();
       sendResponse({ ok: true });
       break;
+    }
     case 'STOP_RECORDING':
-    case 'CANCEL_RECORDING':
-      stopRecording();
-      sendResponse({ ok: true });
+    case 'CANCEL_RECORDING': {
+      const edits = getDomEditsForFlush();
+      const finish = () => {
+        stopRecording();
+        sendResponse({ ok: true });
+      };
+      if (edits.length > 0) {
+        safeSendMessage({ type: 'FLUSH_DOM_EDITS', payload: { edits, url: location.href } })
+          .then(finish)
+          .catch(finish);
+        return true; // keep channel open for async response
+      }
+      finish();
       break;
+    }
     case 'ENTER_EDIT_MODE':
       enterEditMode();
       sendResponse({ ok: true });
@@ -697,14 +848,17 @@ function messageHandler(message: ExtensionMessage, _sender: chrome.runtime.Messa
         if (payload.theme === 'dark') {
           html.classList.add('dark');
           html.setAttribute('data-theme', 'dark');
+          html.setAttribute('data-color-scheme', 'dark');
           html.style.colorScheme = 'dark';
         } else if (payload.theme === 'light') {
           html.classList.remove('dark');
           html.setAttribute('data-theme', 'light');
+          html.setAttribute('data-color-scheme', 'light');
           html.style.colorScheme = 'light';
         } else {
           html.classList.remove('dark');
           html.removeAttribute('data-theme');
+          html.removeAttribute('data-color-scheme');
           html.style.colorScheme = '';
         }
         if (savedFocus instanceof HTMLElement) {

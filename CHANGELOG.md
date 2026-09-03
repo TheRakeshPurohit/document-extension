@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.2.0
+
+### Added
+- Raw screenshot roles on steps: `before*` and `after*` frames alongside primary annotated images.
+- Smart after-click capture with optional toolbar override (`After`) for result-state screenshots.
+- Layered page extraction (`page-extractor`) with accessible-name, parent-region, and page-frame context.
+- New `screenshot` event type for manual camera captures so they are persisted as real steps.
+- Session edit persistence API (`/sessions/:id/edits`) and editor UI panel showing recorded page edits.
+- New event/step metadata for parent context, accessibility state, and after-outcome details.
+
+### Changed
+- Capture pipeline now acknowledges click replay earlier (after raw capture) to reduce perceived interaction delay.
+- Screenshot capture uses optimized encoding flow and keyed IDB screenshot reads for lower memory pressure.
+- Theme emulation writes `data-color-scheme`, re-forces light mode after navigation, and flags same-frame dual captures.
+- Finalize/merge annotation now runs light+dark annotation in parallel while preserving raw canonical images.
+- Export now includes clean before frames and after-result frames when present.
+- Session editor step cards now support frame tabs (Annotated/Clean/Result) and theme toggles.
+- Modal tracking now emits open and close events; keyboard Enter/Space on controls is captured as click-equivalent intent.
+
+### Fixed
+- Skip-highlight decisions are patched to server state to avoid losing prompt decisions after early flushes.
+- Cross-origin navigation events no longer force redundant recapture when screenshots already exist.
+- Edit mode persistence now includes hidden-element edits and re-application on theme-driven DOM churn.
+
 ## v0.1.1
 
 ### Added

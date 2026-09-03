@@ -1,4 +1,4 @@
-import React, { useState, memo } from 'react';
+import React, { useState, memo, useMemo } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { getScreenshotUrl } from '../api/client.js';
@@ -12,6 +12,9 @@ interface StepCardProps {
   onScreenshotClick: (screenshotId: string) => void;
 }
 
+type FrameTab = 'annotated' | 'clean' | 'result';
+type ThemeTab = 'light' | 'dark' | 'both';
+
 export default memo(function StepCard({
   step,
   index,
@@ -21,6 +24,10 @@ export default memo(function StepCard({
 }: StepCardProps) {
   const [editingField, setEditingField] = useState<'title' | 'description' | null>(null);
   const [draft, setDraft] = useState('');
+  const [frame, setFrame] = useState<FrameTab>('annotated');
+  const [theme, setTheme] = useState<ThemeTab>(
+    step.themeCapture === 'same' || !step.altScreenshotId ? 'light' : 'both',
+  );
 
   const {
     attributes,
@@ -37,6 +44,29 @@ export default memo(function StepCard({
     opacity: isDragging ? 0.5 : 1,
   };
 
+  const hasClean = !!(step.beforeLightId || step.beforeDarkId);
+  const hasResult = !!(step.afterLightId || step.afterDarkId);
+  const showDark = step.themeCapture !== 'same';
+
+  const pair = useMemo(() => {
+    if (frame === 'clean') {
+      return {
+        light: step.beforeLightId || step.screenshotId,
+        dark: showDark ? (step.beforeDarkId || step.altScreenshotId) : undefined,
+      };
+    }
+    if (frame === 'result') {
+      return {
+        light: step.afterLightId,
+        dark: showDark ? step.afterDarkId : undefined,
+      };
+    }
+    return {
+      light: step.screenshotId,
+      dark: showDark ? step.altScreenshotId : undefined,
+    };
+  }, [frame, step, showDark]);
+
   const startEditing = (field: 'title' | 'description') => {
     setDraft(field === 'title' ? step.title : step.description);
     setEditingField(field);
@@ -49,13 +79,39 @@ export default memo(function StepCard({
     setEditingField(null);
   };
 
+  const tabBtn = (active: boolean) =>
+    `px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide border transition-colors ${
+      active
+        ? 'bg-indigo-500 text-white border-indigo-500'
+        : 'bg-white/80 text-slate-600 border-slate-200 hover:border-indigo-300'
+    }`;
+
+  const renderShot = (id: string | undefined, label: string) => {
+    if (!id) return null;
+    return (
+      <div className="cursor-pointer relative" onClick={() => onScreenshotClick(id)}>
+        {pair.dark && theme === 'both' && (
+          <span className="absolute top-2 left-2 bg-white/80 text-[10px] text-slate-700 px-1.5 py-0.5 rounded font-medium tracking-wide uppercase border border-slate-200 z-10">
+            {label}
+          </span>
+        )}
+        <img
+          src={getScreenshotUrl(id)}
+          alt={`Step ${index + 1} ${label}`}
+          className="w-full max-h-[400px] object-contain"
+          loading="lazy"
+          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+        />
+      </div>
+    );
+  };
+
   return (
     <div
       ref={setNodeRef}
       style={style}
       className="group relative bg-white/80 border border-slate-200 rounded-2xl overflow-hidden hover:border-indigo-400/40 hover:shadow-[0_8px_30px_rgba(99,102,241,0.10)] transition-all"
     >
-      {/* Top bar: step number + title + actions */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-200/60 bg-white/60">
         <div
           {...attributes}
@@ -106,43 +162,59 @@ export default memo(function StepCard({
         </button>
       </div>
 
-      {/* Screenshots — side by side when both themes available */}
-      {step.screenshotId && (
-        <div
-          className={`bg-slate-100 ${step.altScreenshotId ? 'grid grid-cols-2 gap-px' : ''}`}
-        >
-          <div className="cursor-pointer relative" onClick={() => onScreenshotClick(step.screenshotId!)}>
-            {step.altScreenshotId && (
-              <span className="absolute top-2 left-2 bg-white/80 text-[10px] text-slate-700 px-1.5 py-0.5 rounded font-medium tracking-wide uppercase border border-slate-200">
-                Light
-              </span>
-            )}
-            <img
-              src={getScreenshotUrl(step.screenshotId)}
-              alt={`Step ${index + 1}`}
-              className="w-full max-h-[400px] object-contain"
-              loading="lazy"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-            />
+      {/* Frame / theme tabs */}
+      {(pair.light || hasClean || hasResult) && (
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-slate-200/60 bg-slate-50/80">
+          <div className="flex gap-1">
+            <button type="button" className={tabBtn(frame === 'annotated')} onClick={() => setFrame('annotated')}>
+              Annotated
+            </button>
+            <button
+              type="button"
+              className={tabBtn(frame === 'clean')}
+              onClick={() => setFrame('clean')}
+              disabled={!hasClean && !step.screenshotId}
+            >
+              Clean
+            </button>
+            <button
+              type="button"
+              className={tabBtn(frame === 'result')}
+              onClick={() => setFrame('result')}
+              disabled={!hasResult}
+              title={hasResult ? 'After-click result' : 'No after-click capture'}
+            >
+              Result
+            </button>
           </div>
-          {step.altScreenshotId && (
-            <div className="cursor-pointer relative" onClick={() => onScreenshotClick(step.altScreenshotId!)}>
-              <span className="absolute top-2 left-2 bg-white/80 text-[10px] text-slate-700 px-1.5 py-0.5 rounded font-medium tracking-wide uppercase border border-slate-200">
+          {showDark && (pair.dark || step.altScreenshotId) && (
+            <div className="flex gap-1 ml-auto">
+              <button type="button" className={tabBtn(theme === 'light')} onClick={() => setTheme('light')}>
+                Light
+              </button>
+              <button type="button" className={tabBtn(theme === 'dark')} onClick={() => setTheme('dark')}>
                 Dark
-              </span>
-              <img
-                src={getScreenshotUrl(step.altScreenshotId)}
-                alt={`Step ${index + 1} (dark)`}
-                className="w-full max-h-[400px] object-contain"
-                loading="lazy"
-                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-              />
+              </button>
+              <button type="button" className={tabBtn(theme === 'both')} onClick={() => setTheme('both')}>
+                Both
+              </button>
             </div>
           )}
         </div>
       )}
 
-      {/* Sub-steps for grouped actions */}
+      {pair.light && (
+        <div
+          className={`bg-slate-100 ${
+            theme === 'both' && pair.dark ? 'grid grid-cols-2 gap-px' : ''
+          }`}
+        >
+          {(theme === 'light' || theme === 'both') && renderShot(pair.light, 'Light')}
+          {(theme === 'dark' || theme === 'both') && pair.dark && renderShot(pair.dark, 'Dark')}
+          {theme === 'dark' && !pair.dark && renderShot(pair.light, 'Light')}
+        </div>
+      )}
+
       {step.subSteps && step.subSteps.length > 0 && (
         <div className="px-4 py-3 border-b border-slate-200/60">
           <ol className="space-y-1.5">
@@ -158,7 +230,6 @@ export default memo(function StepCard({
         </div>
       )}
 
-      {/* Description below screenshot */}
       <div className="px-4 py-3">
         {editingField === 'description' ? (
           <textarea

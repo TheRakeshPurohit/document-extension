@@ -22,6 +22,7 @@ import {
   deleteSession,
   mergeSteps,
   keepSeparate,
+  getSessionEdits,
 } from '../api/client.js';
 import StepCard from '../components/StepCard.js';
 import MergePromptCard from '../components/MergePromptCard.js';
@@ -49,6 +50,13 @@ export default function SessionEditor() {
     queryFn: () => getSession(id!),
     enabled: !!id,
   });
+
+  const { data: editsData } = useQuery({
+    queryKey: ['session-edits', id],
+    queryFn: () => getSessionEdits(id!),
+    enabled: !!id,
+  });
+  const pageEdits = editsData?.edits ?? [];
 
   const serverSteps = data?.steps ?? [];
   const steps = localSteps ?? serverSteps;
@@ -284,6 +292,34 @@ export default function SessionEditor() {
           </div>
         </div>
       </div>
+
+      {/* Page edits applied during recording */}
+      {pageEdits.length > 0 && (
+        <div className="mb-6 bg-amber-50/80 border border-amber-200 rounded-2xl p-4">
+          <h2 className="text-sm font-semibold text-amber-900 mb-2">Page edits</h2>
+          <ul className="space-y-1.5 text-sm text-amber-900/80">
+            {pageEdits.map((edit) => (
+              <li key={edit.id} className="flex gap-2 items-start">
+                <span className="text-[10px] uppercase font-bold tracking-wide bg-amber-200/80 text-amber-900 px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5">
+                  {edit.kind === 'hide' ? 'Hidden' : 'Text'}
+                </span>
+                <span className="min-w-0 break-words">
+                  {edit.kind === 'hide' ? (
+                    <>Hid <code className="text-xs bg-white/70 px-1 rounded">{edit.selector}</code>
+                      {edit.original ? <> (“{edit.original.slice(0, 40)}”)</> : null}
+                    </>
+                  ) : (
+                    <>
+                      “{edit.original.slice(0, 40)}{edit.original.length > 40 ? '…' : ''}” → “
+                      {edit.modified.slice(0, 40)}{edit.modified.length > 40 ? '…' : ''}”
+                    </>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Steps */}
       {steps.length === 0 ? (

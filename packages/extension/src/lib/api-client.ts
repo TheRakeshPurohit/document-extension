@@ -57,3 +57,24 @@ export async function deleteSession(sessionId: string) {
   if (!res.ok) throw new Error(`Delete session failed: ${res.status}`);
   return res.json();
 }
+
+export async function uploadDomEdits(
+  sessionId: string,
+  edits: Array<{ selector: string; original: string; modified: string; kind?: string; url?: string }>,
+) {
+  const res = await fetch(`${BASE_URL}/sessions/${sessionId}/edits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ edits }),
+  });
+  if (!res.ok) throw new Error(`Upload edits failed: ${res.status}`);
+  return res.json();
+}
+
+export async function patchSkipHighlight(sessionId: string, eventId: string) {
+  const res = await fetch(`${BASE_URL}/sessions/${sessionId}/events/${eventId}/skip-highlight`, {
+    method: 'PATCH',
+  });
+  if (!res.ok) throw new Error(`Skip highlight failed: ${res.status}`);
+  return res.json();
+}

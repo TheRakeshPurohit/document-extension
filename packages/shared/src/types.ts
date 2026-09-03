@@ -6,7 +6,57 @@ export type RecordedEventType =
   | 'select'
   | 'navigate'
   | 'submit'
-  | 'modal';
+  | 'modal'
+  | 'screenshot';
+
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ParentContext {
+  selector: string;
+  tag: string;
+  role?: string;
+  name: string;
+  text?: string;
+  rect?: Rect;
+  landmark?: string;
+}
+
+export interface ElementStates {
+  expanded?: boolean;
+  pressed?: boolean;
+  checked?: boolean;
+  selected?: boolean;
+  disabled?: boolean;
+  current?: string;
+}
+
+export type AfterOutcomeKind =
+  | 'expanded'
+  | 'collapsed'
+  | 'navigated'
+  | 'submitted'
+  | 'toggled'
+  | 'opened-dialog'
+  | 'unknown';
+
+export interface AfterOutcome {
+  outcome: AfterOutcomeKind;
+  states?: ElementStates;
+  openOverlayName?: string;
+  newUrl?: string;
+  newHeading?: string;
+}
+
+export interface HighlightSpec {
+  rect: Rect;
+  number?: number;
+  skip?: boolean;
+}
 
 export interface ClickMeta {
   elementTag: string;
@@ -15,12 +65,13 @@ export interface ClickMeta {
   role?: string;
   selector: string;
   coordinates: { x: number; y: number };
-  elementRect?: { x: number; y: number; width: number; height: number };
+  elementRect?: Rect;
   viewportSize?: { width: number; height: number };
   nearestHeading?: string;
   sectionLabel?: string;
   containerRole?: string;
   href?: string;
+  target?: string;
   title?: string;
   parentText?: string;
   fieldLabel?: string;
@@ -36,6 +87,15 @@ export interface ClickMeta {
   inEphemeralUI?: boolean;
   scrollPosition?: { x: number; y: number };
   skipHighlight?: boolean;
+  accessibleName?: string;
+  accessibleDescription?: string;
+  parent?: ParentContext;
+  states?: ElementStates;
+  afterOutcome?: AfterOutcome;
+  themeCapture?: 'dual' | 'same';
+  pageHeading?: string;
+  openOverlays?: string[];
+  buttonType?: string;
 }
 
 export interface InputMeta {
@@ -48,11 +108,24 @@ export interface InputMeta {
   sectionLabel?: string;
   containerRole?: string;
   breadcrumb?: string;
-  elementRect?: { x: number; y: number; width: number; height: number };
+  elementRect?: Rect;
   viewportSize?: { width: number; height: number };
   parentId?: string;
+  parentName?: string;
+  parentText?: string;
+  parent?: ParentContext;
   listPosition?: string;
   scrollPosition?: { x: number; y: number };
+  tooltipText?: string;
+  viewportHint?: string;
+  nearbyText?: string;
+  semanticClasses?: string;
+  accessibleName?: string;
+  accessibleDescription?: string;
+  states?: ElementStates;
+  pageHeading?: string;
+  openOverlays?: string[];
+  skipHighlight?: boolean;
 }
 
 export interface SelectMeta {
@@ -63,17 +136,33 @@ export interface SelectMeta {
   sectionLabel?: string;
   containerRole?: string;
   breadcrumb?: string;
-  elementRect?: { x: number; y: number; width: number; height: number };
+  elementRect?: Rect;
   viewportSize?: { width: number; height: number };
   parentId?: string;
+  parentName?: string;
+  parentText?: string;
+  parent?: ParentContext;
   listPosition?: string;
   scrollPosition?: { x: number; y: number };
+  tooltipText?: string;
+  viewportHint?: string;
+  nearbyText?: string;
+  semanticClasses?: string;
+  accessibleName?: string;
+  accessibleDescription?: string;
+  states?: ElementStates;
+  pageHeading?: string;
+  openOverlays?: string[];
+  skipHighlight?: boolean;
 }
 
 export interface NavigateMeta {
   fromUrl: string;
   toUrl: string;
   newTitle: string;
+  pageHeading?: string;
+  openOverlays?: string[];
+  themeCapture?: 'dual' | 'same';
 }
 
 export interface SubmitMeta {
@@ -81,6 +170,14 @@ export interface SubmitMeta {
   formAction?: string;
   fieldCount: number;
   nearestHeading?: string;
+  selector?: string;
+  elementRect?: Rect;
+  viewportSize?: { width: number; height: number };
+  accessibleName?: string;
+  parent?: ParentContext;
+  pageHeading?: string;
+  openOverlays?: string[];
+  breadcrumb?: string;
 }
 
 export interface ModalMeta {
@@ -88,6 +185,22 @@ export interface ModalMeta {
   dialogText?: string;
   selector?: string;
   nearestHeading?: string;
+  accessibleName?: string;
+  elementRect?: Rect;
+  viewportSize?: { width: number; height: number };
+  pageHeading?: string;
+  openOverlays?: string[];
+  themeCapture?: 'dual' | 'same';
+}
+
+export interface ScreenshotMeta {
+  label?: string;
+  pageHeading?: string;
+  openOverlays?: string[];
+  themeCapture?: 'dual' | 'same';
+  skipHighlight?: boolean;
+  viewportSize?: { width: number; height: number };
+  scrollPosition?: { x: number; y: number };
 }
 
 export type EventMetadata =
@@ -96,12 +209,14 @@ export type EventMetadata =
   | SelectMeta
   | NavigateMeta
   | SubmitMeta
-  | ModalMeta;
+  | ModalMeta
+  | ScreenshotMeta;
 
 export interface DomEdit {
   selector: string;
   original: string;
   modified: string;
+  kind?: 'text' | 'hide';
 }
 
 export interface RecordedEvent {
@@ -110,8 +225,14 @@ export interface RecordedEvent {
   timestamp: number;
   url: string;
   pageTitle: string;
+  /** Raw before-click light screenshot (canonical) */
   screenshotId?: string;
+  /** Raw before-click dark screenshot */
   altScreenshotId?: string;
+  /** Raw after-click light screenshot */
+  afterScreenshotId?: string;
+  /** Raw after-click dark screenshot */
+  afterAltScreenshotId?: string;
   metadata: EventMetadata;
   domEdits?: DomEdit[];
 }
@@ -131,7 +252,7 @@ export interface Session {
 export interface SubStep {
   title: string;
   description: string;
-  elementRect?: { x: number; y: number; width: number; height: number };
+  elementRect?: Rect;
 }
 
 export interface Step {
@@ -140,12 +261,24 @@ export interface Step {
   sortOrder: number;
   title: string;
   description: string;
+  /** Primary annotated before (light) — kept for export/editor compat */
   screenshotId?: string;
+  /** Primary annotated before (dark) */
   altScreenshotId?: string;
+  /** Raw before light (clean) */
+  beforeLightId?: string;
+  /** Raw before dark (clean) */
+  beforeDarkId?: string;
+  /** Raw after light */
+  afterLightId?: string;
+  /** Raw after dark */
+  afterDarkId?: string;
   sourceEventIds: string[];
   isEdited: boolean;
   subSteps?: SubStep[];
   mergeWithNextId?: string;
+  themeCapture?: 'dual' | 'same';
+  highlights?: HighlightSpec[];
 }
 
 // ── API Request/Response Shapes ──
@@ -169,6 +302,14 @@ export interface UpdateStepsRequest {
   deletedStepIds?: string[];
 }
 
+export interface SessionEdit {
+  selector: string;
+  original: string;
+  modified: string;
+  kind: 'text' | 'hide';
+  url?: string;
+}
+
 // ── Extension Messages ──
 
 export type ExtensionMessageType =
@@ -186,7 +327,9 @@ export type ExtensionMessageType =
   | 'HIDE_TOOLBAR'
   | 'SHOW_TOOLBAR'
   | 'GET_STATE'
-  | 'CAPTURE_SCREENSHOT';
+  | 'CAPTURE_SCREENSHOT'
+  | 'CAPTURE_AFTER'
+  | 'FLUSH_DOM_EDITS';
 
 export interface ExtensionMessage {
   type: ExtensionMessageType;

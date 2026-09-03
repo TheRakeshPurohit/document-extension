@@ -20,6 +20,7 @@ let toolbarTimer: ReturnType<typeof setInterval> | null = null;
 let promptDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let promptOnYes: (() => void) | null = null;
 let promptOnNo: (() => void) | null = null;
+let promptOnAfter: (() => void) | null = null;
 
 export function getToolbarHost(): HTMLElement | null {
   return toolbarHost;
@@ -174,6 +175,11 @@ export function createFloatingToolbar(editMode: boolean, onEditToggle: () => voi
         padding: 4px 11px;
       }
       button.no-btn:hover { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
+      button.after-btn {
+        background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe;
+        font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px; cursor: pointer;
+      }
+      button.after-btn:hover { background: #e0e7ff; }
       button.screenshot {
         padding: 5px 9px;
         color: #475569;
@@ -193,6 +199,7 @@ export function createFloatingToolbar(editMode: boolean, onEditToggle: () => voi
         <span class="confirm-label" id="confirm-label">Highlight this?</span>
         <button class="yes-btn" id="confirm-yes">✓ Keep</button>
         <button class="no-btn" id="confirm-no">✗ Skip</button>
+        <button class="after-btn" id="confirm-after" title="Also capture after-click result">After</button>
       </div>
       <div class="bar">
         <span class="logo">${LOGO_SVG_HTML}</span>
@@ -243,11 +250,23 @@ export function createFloatingToolbar(editMode: boolean, onEditToggle: () => voi
     hideHighlightPrompt();
     cb?.();
   });
+  toolbarShadow.getElementById('confirm-after')!.addEventListener('click', () => {
+    const after = promptOnAfter;
+    const yes = promptOnYes;
+    hideHighlightPrompt();
+    yes?.();
+    after?.();
+  });
 
   document.documentElement.appendChild(toolbarHost);
 }
 
-export function showHighlightPrompt(label: string, onYes: () => void, onNo: () => void) {
+export function showHighlightPrompt(
+  label: string,
+  onYes: () => void,
+  onNo: () => void,
+  onAfter?: () => void,
+) {
   if (!toolbarShadow) { onYes(); return; }
 
   // Clear any previous pending prompt (treat as "Yes")
@@ -255,16 +274,20 @@ export function showHighlightPrompt(label: string, onYes: () => void, onNo: () =
     const prev = promptOnYes;
     promptOnYes = null;
     promptOnNo = null;
+    promptOnAfter = null;
     clearPromptTimer();
     prev();
   }
 
   promptOnYes = onYes;
   promptOnNo = onNo;
+  promptOnAfter = onAfter || null;
 
   const row = toolbarShadow.getElementById('confirm-row');
   const labelEl = toolbarShadow.getElementById('confirm-label');
+  const afterBtn = toolbarShadow.getElementById('confirm-after');
   if (row) row.classList.add('visible');
+  if (afterBtn) afterBtn.style.display = onAfter ? '' : 'none';
   if (labelEl) {
     const short = label.length > 30 ? label.slice(0, 28) + '…' : label;
     labelEl.innerHTML = `Annotate <em>${short}</em>?`;
@@ -282,6 +305,7 @@ export function hideHighlightPrompt() {
   clearPromptTimer();
   promptOnYes = null;
   promptOnNo = null;
+  promptOnAfter = null;
   if (!toolbarShadow) return;
   const row = toolbarShadow.getElementById('confirm-row');
   if (row) row.classList.remove('visible');
